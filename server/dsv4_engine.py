@@ -74,6 +74,17 @@ class CLib:
         if hasattr(L, "dsv4_stats"):   # [dsv4-rel6-sched] DSV4_STATS=1 (benches)
             L.dsv4_stats.restype = ctypes.c_int
             L.dsv4_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]
+        # [ss16-drafter] TIER 11: the drafter's counters (qe_draft_stats, the same call the Qwen server already makes)
+        # and the DSV4_DSTATS observation block. Both optional: an older library simply has neither, and the reader
+        # returns None instead of the debug mode's numbers.
+        self.has_draft = hasattr(L, "qe_draft_stats")
+        if self.has_draft:
+            L.qe_draft_stats.restype = None
+            L.qe_draft_stats.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_longlong)]
+        self.has_drafter = hasattr(L, "dsv4_drafter_stats")
+        if self.has_drafter:
+            L.dsv4_drafter_stats.restype = ctypes.c_int
+            L.dsv4_drafter_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]
         self.has_sched = hasattr(L, "dsv4_resume")   # [dsv4-rel6-sched] (an older library: one request at a time)
         if self.has_sched:
             L.dsv4_resume.restype = ctypes.c_int
@@ -184,6 +195,22 @@ class CLib:
             return None
         v = (ctypes.c_double * 7)()
         return list(v) if self.L.dsv4_stats(self.h, v) else None
+
+    def draft_stats(self):   # [ss16-drafter] TIER 11: {steps, DSpark drafted, DSpark accepted, lookup drafted,
+        # lookup accepted} of the sequence in hand, since it was created; None = the library has no such call.
+        # Counters of the ACTIVE sequence only - the dsv4 server holds one handle and time-slices conversations
+        # through it, so read this when the job you are measuring is the one loaded (the worker thread does).
+        if not self.has_draft:
+            return None
+        v = (ctypes.c_longlong * 5)()
+        self.L.qe_draft_stats(self.h, 0, v)
+        return list(v)
+
+    def drafter_stats(self):   # [ss16-drafter] the DSV4_DSTATS observation block; None = the counter is off
+        if not self.has_drafter:
+            return None
+        v = (ctypes.c_double * 24)()
+        return list(v) if self.L.dsv4_drafter_stats(self.h, v) else None
 
     def resume(self, ids):   # [dsv4-rel6-sched] ids = tokens + the pending one of a parked reply: active again, no prefill
         a = (ctypes.c_int * len(ids))(*ids)

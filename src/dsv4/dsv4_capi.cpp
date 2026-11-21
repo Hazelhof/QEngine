@@ -828,4 +828,43 @@ int dsv4_stats(void* p, double* out7) {
     for (int i = 0; i < 7; i++) out7[i] = v[i];
     return 1;
 }
+// [ss16-drafter] TIER 11 (server/qe_capi.h:163), implemented for the engine that was missing it: draft statistics of
+// the sequence this handle holds, since it was created. out[5] = {verify steps, DSpark drafted, DSpark accepted,
+// lookup drafted, lookup accepted} - the Qwen engine's contract (src/flash/flash_capi.cpp:5622) and the same
+// arithmetic (its Slot::count_step), so server/engine_stats.py prints one kind of number for both engines. The dsv4
+// API is already one sequence per handle, so `slot` is accepted and ignored (as the Qwen non-batch path ignores it).
+// Without this call the server's DraftStats swallows the AttributeError (engine_stats.py:33-34) and the SpecDecoding
+// line is silently left out - which is how dsv4 ran for as long as it has had a drafter and never reported one.
+void qe_draft_stats(void* p, int slot, long long* out) {
+    (void)slot;
+    H* h = (H*)p;
+    for (int i = 0; i < 5; i++) out[i] = h->e->ds_ct[i];
+}
+// [ss16-drafter] DSV4_DSTATS=1: the drafter's observation block, measured on this box. Fixed layout, 24 doubles:
+//   [0..2]   passes by kind: DSpark verify / prompt lookup / plain step (the census DACC cannot report: it forces
+//            dspark_adapt = 0 and no lookup, so every position is a full block)
+//   [3..7]   rows tested at position 0..4     [8..12] rows kept there (the conditional series DACC reports, from the
+//            production pass: g_conf records only up to the first rejection, so it cannot give this)
+//   [13]     draft rows the gate chose, summed over DSpark passes (gate length = [13] / [0])
+//   [14]     ds_ms_spec   [15] ds_ms_plain    the judge's own two EMAs: the passes' and the plain steps' ms/token
+//   [16..21] ds_Tobs[0..5]: ms per pass verifying n drafts, EWMA measured here, seeded by its first sample
+//   [22]     ds_lam (tokens/ms; moves only when DSV4_DSSEL runs)   [23] reserved
+// Returns 0 when DSV4_DSTATS is off. Nothing in this block is read by a decode decision: the shipped engine's ds_T[]
+// is the author's published table unless DSV4_DSSEL writes it, and this project does not switch that on to take a
+// measurement - it reads the cost the same way, without steering.
+int dsv4_drafter_stats(void* p, double* out24) {
+    H* h = (H*)p;
+    if (!dstats_on()) return 0;
+    Engine* E = h->e;
+    for (int i = 0; i < 3; i++) out24[i] = (double)E->ds_kind[i];
+    for (int i = 0; i < 5; i++) out24[3 + i] = (double)E->ds_tried[i];
+    for (int i = 0; i < 5; i++) out24[8 + i] = (double)E->ds_ok[i];
+    out24[13] = E->ds_gate;
+    out24[14] = E->ds_ms_spec;
+    out24[15] = E->ds_ms_plain;
+    for (int i = 0; i < 6; i++) out24[16 + i] = E->ds_Tobs[i];
+    out24[22] = E->ds_lam;
+    out24[23] = 0;
+    return 1;
+}
 }

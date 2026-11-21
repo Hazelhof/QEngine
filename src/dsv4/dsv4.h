@@ -268,6 +268,7 @@ void set_fuse(Engine* E, int on);
 void set_lookup(Engine* E, int n);   // R17: prompt lookup beside DSpark (min match; 0 = off)
 void set_dspark(Engine* E, int n, float tau);   // n < 0 / tau < 0: unchanged
 void reset(Engine* E);
+bool dstats_on();   // [ss16-drafter] DSV4_DSTATS=1: the drafter's observation counters are being kept (see TIER 11)
 // [srv-disconnect] flag (nullptr = none): read before every prefill chunk (another thread may set it); non-zero ->
 // PrefillAborted. The pointer is the caller's per call (the server sets it around one start and clears it after)
 void set_prefill_abort(Engine* E, const int* flag);

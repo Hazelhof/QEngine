@@ -1011,6 +1011,17 @@ public:
     int eg_pre_s = 0, eg_pre_n = 0, eg_pre_t[8] = {};
     double ds_lam = 0;                    // R20: tokens per ms (EWMA over passes; 0 = not yet set)
     double ds_T[6] = {22.3, 29.3, 36.8, 42.3, 48.4, 54.1};   // R20: ms per call verifying n drafts (EWMA, n = 0..5)
+    // [ss16-drafter] the drafter's counters (server/qe_capi.h TIER 11). Counting only: no decode decision reads any of
+    // these. ds_ct mirrors the Qwen engine's Slot::ds (src/flash/flash_capi.cpp:399) field for field, so one number
+    // means one thing across the engines. ds_Tobs[] is what ds_T[] would be on this box: ds_len_upd - the only writer
+    // of ds_T[] - returns unless DSV4_DSSEL runs, so in every shipped configuration ds_T[] keeps its published
+    // constants and reports no row cost at all. The observation arrays need DSV4_DSTATS=1 and change nothing without it.
+    long long ds_ct[5] = {};        // {steps, DSpark drafted, DSpark accepted, lookup drafted, lookup accepted}
+    long long ds_kind[3] = {};      // passes by kind: 0 DSpark verify, 1 prompt lookup, 2 plain step (DSV4_DSTATS)
+    long long ds_tried[5] = {}, ds_ok[5] = {};   // per-row conditional acceptance: rows tested / rows kept (DSTATS)
+    long long ds_Tn[6] = {};        // passes counted into ds_Tobs[n]
+    double ds_Tobs[6] = {};         // ms per pass verifying n drafts, EWMA, MEASURED HERE (DSV4_DSTATS)
+    double ds_gate = 0;             // chosen draft rows summed over DSpark passes; gate length = ds_gate / ds_kind[0]
     // sequence state
     int pos = 0;
     int dyn_clock = 0;
@@ -6426,6 +6437,7 @@ void reset(Engine* E) {
     E->ds_wms = E->ds_wtok = 0;
     E->ds_lam = 0;   // R20: tokens / ms per sequence (T[n] stays: the engine's own cost table)
     E->ds_ms_plain = E_dsplainstart ? 0 : E->ds_prior;
+    for (int i = 0; i < 5; i++) E->ds_ct[i] = 0;   // [ss16-drafter] "since the sequence was created", as TIER 11 says
     E->toks.clear();
     for (int s = 0; s < 4; s++) E->tail_n[s] = E->tc[s] = 0;
     kv_release(E);   // [dsv4-rel4-p2]
@@ -11595,6 +11607,7 @@ static void xcone_flush(Engine* E, const char* why) {
     const bool d_plain = E->ds_plain, d_probe = E->ds_probe, so = E->samp_on;
     const int d_cnt = E->ds_cnt, d_lk = E->lk_hold;
     const double d_spec = E->ds_ms_spec, d_pl = E->ds_ms_plain, d_wms = E->ds_wms, d_wtok = E->ds_wtok, d_lam = E->ds_lam;
+    const long long d_ct[5] = {E->ds_ct[0], E->ds_ct[1], E->ds_ct[2], E->ds_ct[3], E->ds_ct[4]};   // [ss16-drafter]
     reset(E);
     E->samp_on = false;
     if (!t.empty()) (void)prefill(E, t);
@@ -11608,6 +11621,7 @@ static void xcone_flush(Engine* E, const char* why) {
     E->ds_wms = d_wms;
     E->ds_wtok = d_wtok;
     E->ds_lam = d_lam;
+    for (int i = 0; i < 5; i++) E->ds_ct[i] = d_ct[i];   // [ss16-drafter] the re-prefill's steps are not new drafts
     if (sr >= 0) snap_mark(E, sr);
 }
 int prefill(Engine* E, const std::vector<int>& ids, std::vector<float>* nll, std::vector<int>* am_all, int follow) {
@@ -11879,6 +11893,11 @@ static void moe_draft(Engine* E, Card& c, Layer& W, int R) {
 // the target's text does not depend on the drafter; each block (position s, drafts for s + 1 .. s + 5, confidences) is
 // scored against the realised tokens at the next reset / exit: mean leading matches of the full block, of the tau-gated
 // block (= accepted drafts per pass of the gated policy), gate length, conditional acceptance per row
+// [ss16-drafter] DSV4_DSTATS=1: observe the drafter in the PRODUCTION shape - per-row conditional acceptance, the
+// gate's chosen length, the pass census and the row cost measured on this box. Opt-in, read-only: it never steers a
+// decode decision, which is the point - the alternative is DSV4_DSSEL, marked not-a-default precisely because it does.
+static const bool g_dstats = getenv("DSV4_DSTATS") != nullptr;
+bool dstats_on() { return g_dstats; }   // [ss16-drafter] the C API asks the engine, so there is one definition of it
 static const bool g_dacc = getenv("DSV4_DACC") != nullptr;
 struct DaccBlk { int s; int d[5]; float c[5]; };
 static std::vector<DaccBlk> g_dacc_b;
@@ -12127,6 +12146,7 @@ int snap_restore(Engine* E) {
     E->ds_wms = E->ds_wtok = 0;
     E->ds_lam = 0;
     E->ds_ms_plain = E_dsplainstart ? 0 : E->ds_prior;
+    for (int i = 0; i < 5; i++) E->ds_ct[i] = 0;   // [ss16-drafter] (the DSTATS arrays are per box, not per sequence)
     seq_moved(E);
     return P;
 }
@@ -12177,7 +12197,8 @@ int trim(Engine* E, int L) {
 // (the path trim / snap_restore take): exact by construction.
 namespace {
 struct SeqHdr {
-    uint32_t magic = 0x31515344u, ver = 4;   // 2: [dsv4-rel2-p1] kring; 3: [dsv4-rel4-p2] park; 4: [dsv4-xcall] xpend
+    uint32_t magic = 0x31515344u, ver = 5;   // 2: [dsv4-rel2-p1] kring; 3: [dsv4-rel4-p2] park; 4: [dsv4-xcall] xpend;
+                                             // 5: [ss16-drafter] ds_ct (the draft counters ride with the sequence)
     int pos = 0, lo = 0, slo = 0, shi = 0, cone_min = 0, snap_pos = -1, snap_cone = 0, mh_pos0 = 0, mh_n = 0, ntok = 0, maxctx = 0, dspark = 0;
     int tc[4] = {}, tail_n[4] = {};
     int ds_plain = 0, ds_probe = 0, ds_cnt = 0, lk_hold = 0;
@@ -12186,6 +12207,7 @@ struct SeqHdr {
     int parked = 0;  // [dsv4-rel4-p2] 1 = seq_park's blob: the src rows stay with the engine (not in the blob)
     int xpend = 0;   // [dsv4-xcall] the last chunk skipped layers 21-39 (Engine::xcone_prev)
     int xpend_until = 0;   // [dsv4-xcall] review M1
+    long long ds_ct[5] = {};   // [ss16-drafter] {steps, DSpark drafted, DSpark accepted, lookup drafted, accepted}
 };
 struct SeqPiece {   // one device range of the blob
     int card;
@@ -12291,6 +12313,7 @@ static size_t seq_save_i(Engine* E, std::vector<uint8_t>& out, bool park) {
     h.ds_wms = E->ds_wms;
     h.ds_wtok = E->ds_wtok;
     h.ds_lam = E->ds_lam;
+    for (int i = 0; i < 5; i++) h.ds_ct[i] = E->ds_ct[i];   // [ss16-drafter]
     h.xpend = E->xcone_prev;   // [dsv4-xcall]
     h.xpend_until = E->xpend_until;
     std::vector<SeqPiece> v;
@@ -12556,6 +12579,7 @@ static int seq_load_i(Engine* E, const std::vector<uint8_t>& in, int rid) {
     E->ds_wms = h.ds_wms;
     E->ds_wtok = h.ds_wtok;
     E->ds_lam = h.ds_lam;
+    for (int i = 0; i < 5; i++) E->ds_ct[i] = h.ds_ct[i];   // [ss16-drafter]
     E->xcone_prev = h.xpend != 0;   // [dsv4-xcall]
     E->xpend_until = h.xpend_until;
     seq_moved(E);
@@ -12731,12 +12755,25 @@ static void ds_len_upd(Engine* E, int n, int tok, double ms) {   // after a call
     const double r = tok / ms;
     E->ds_lam = E->ds_lam > 0 ? 0.75 * E->ds_lam + 0.25 * r : r;
 }
+// [ss16-drafter] TIER 11 (server/qe_capi.h): the drafter's counters of the active sequence. The arithmetic is the Qwen
+// engine's Slot::count_step (src/flash/flash_capi.cpp:400-405) verbatim, because the server's formatter is shared:
+// every step counts, a plain step is a step with nothing drafted, and drafted never reads below what was accepted.
+// "Mean acceptance length" and "Avg Draft acceptance rate" then mean the same thing for both engines - a denominator
+// of our own choosing would be a different number wearing the same name.
+static void count_pass(Engine* E, bool lookup, int drafted, int emitted) {
+    const int acc = std::max(0, emitted - 1);
+    E->ds_ct[0]++;
+    E->ds_ct[lookup ? 3 : 1] += std::max(drafted, acc);
+    E->ds_ct[lookup ? 4 : 2] += acc;
+    if (g_dstats) E->ds_kind[lookup ? 1 : (emitted > 1 ? 0 : 2)]++;
+}
 int decode_spec(Engine* E, int t, std::vector<int>& out, StepTimes* tm, int cap) {
     xcone_flush(E, "decode");   // [dsv4-xcall]
     kv_reserve(E, E->pos + MAXR);   // [dsv4-rel4-p2]
     if (!E->dspark) {   // DSpark off (not requested, or switched off at load for lack of VRAM): plain steps
         cap_wait(E);
         out.push_back(decode(E, t, tm));
+        count_pass(E, false, 0, 1);   // [ss16-drafter]
         return 1;
     }
     if (g_dacc) E->o.dspark_adapt = 0;   // R22 acceptance gate: no plain runs, no lookup
@@ -12763,6 +12800,7 @@ int decode_spec(Engine* E, int t, std::vector<int>& out, StepTimes* tm, int cap)
     if (E->o.dspark_adapt && E->ds_plain && !nlk) {   // R8: plain steps (measured), the drafter's window kept current
         auto ta = clk::now();
         out.push_back(decode(E, t, tm));
+        count_pass(E, false, 0, 1);   // [ss16-drafter] the judge's plain steps: a step, nothing drafted
         ds_after_plain(E);
         draft_window(E);
         E->have_draft = false;
@@ -12794,6 +12832,7 @@ int decode_spec(Engine* E, int t, std::vector<int>& out, StepTimes* tm, int cap)
     int nd = std::max(1, std::min(5, E->o.dspark_n));
     if (E->pos + nd + 1 + 5 > E->o.maxctx) {   // no room for a block: plain steps (the draft window goes stale)
         out.push_back(decode_i(E, t, tm, true));   // R19 (review r18 N2): mem_guard / ns_tick ran above
+        count_pass(E, false, 0, 1);   // [ss16-drafter] no room for a block: a plain step
         E->have_draft = false;
         return 1;
     }
@@ -12826,6 +12865,7 @@ int decode_spec(Engine* E, int t, std::vector<int>& out, StepTimes* tm, int cap)
     if (nd == 0 && E->graph) {   // R17: nothing to verify: a one-row step through the step graph
         const int r = decode_i(E, t, tm, true);   // (R18 L2: mem_guard / ns_tick already done above)
         out.push_back(r);
+        count_pass(E, false, 0, 1);   // [ss16-drafter] a one-row step through the graph: as the Qwen engine counts it
         ds_after_plain(E);
         auto t3 = clk::now();
         draft_window(E);
@@ -12902,6 +12942,7 @@ int decode_spec(Engine* E, int t, std::vector<int>& out, StepTimes* tm, int cap)
     for (int j = 0; j < a; j++)   // review r6 H1: stop at the first EOS (nothing after it is output or kept)
         if (g[j] == EOS) { a = j; break; }
     for (int j = 0; j <= a; j++) out.push_back(g[j]);
+    count_pass(E, use_lk, nd, a + 1);   // [ss16-drafter] after the EOS trim, so it counts what the caller received
     if (E->o.dyn) {   // rows 0..a are real positions; the rejected rows never feed the tier
         const auto tcm = clk::now();
         spec_commit(E, a + 1);
@@ -12939,6 +12980,16 @@ int decode_spec(Engine* E, int t, std::vector<int>& out, StepTimes* tm, int cap)
     }
     E->tm = nullptr;
     if (!use_lk && !plain_mode) ds_len_upd(E, nd, a + 1, ms_since(t0));
+    if (g_dstats && !plain_mode) {   // [ss16-drafter] observe only: nothing below is read by a decode decision
+        const double pms = ms_since(t0);
+        const int nn = std::min(5, nd);
+        E->ds_Tobs[nn] = E->ds_Tn[nn] > 0 ? 0.75 * E->ds_Tobs[nn] + 0.25 * pms : pms;   // seeded by its first sample
+        E->ds_Tn[nn]++;
+        if (!use_lk) E->ds_gate += nd;   // the gate's chosen length, summed over DSpark passes (ds_kind[0] is their count)
+        for (int j = 0; j < nd; j++) { E->ds_tried[j]++; E->ds_ok[j] += a > j; }
+        // ^ the per-row conditional series DACC reports. g_conf (:12897) cannot give it: its loop stops at j <= a, so a
+        // row that was tested and rejected past the first miss is never recorded. That is the one genuinely new field.
+    }
     if (E->o.dspark_adapt && !plain_mode) {   // R8: per-token cost of this pass (incl. its draft) vs the plain steps' running cost
         double mt = ms_since(t0) / (a + 1);
         E->ds_ms_spec = E->ds_ms_spec > 0 ? 0.75 * E->ds_ms_spec + 0.25 * mt : mt;

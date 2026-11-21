@@ -20,6 +20,7 @@ import uuid
 import dsv4_chat as C
 import dsv4_gguf as G
 import dsv4_stats
+import engine_stats   # [ss16-drafter] the shared per-request stats formatter (the Qwen server already used it)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GIB = 1 << 30
@@ -124,6 +125,23 @@ class Server:
         if es is not None:   # DSV4_STATS=1: engine totals since the start
             d["passes"] = dict(zip(("passes", "tokens", "pass_ms", "lane_ms", "route_ms", "host_gb", "lane_gb"), es))
         self.st.engine(d)
+
+    def drafter_line(self, job, prompt, cached, completion, decode_s):
+        """[ss16-drafter] TIER 11: the per-request SpecDecoding line, from the engine's own draft counters - the same
+        formatter and the same words the Qwen server prints, so one log parses both engines (and so the club harness,
+        which has been grepping for this line since before we had it, finally finds one). Prefill is passed as 0:
+        dsv4_app tracks time to first token, not a separate prefill timer, and engine_stats skips its prompt-eval line
+        on a zero - claiming a prefill rate this server does not measure would be worse than omitting it."""
+        ds0 = job.get("ds0")
+        if ds0 is None:   # cancelled before its first token: there is no delta to take, and the sequence's all-time
+            return        # counters would print as this request's (engine_stats.delta returns b when a is None)
+        ds = engine_stats.delta(ds0, self.e.draft_stats())
+        if not ds:
+            return
+        for ln in engine_stats.lines({"prompt_tokens": prompt, "cached_tokens": cached, "prefill_s": 0.0,
+                                      "completion_tokens": completion, "decode_s": decode_s}, ds):
+            if ln.startswith("[stats] SpecDecoding"):   # the timing lines are dsv4_app's own [dsv4] request line
+                print(ln, flush=True)
 
     # ---------------------------------------------------------------- generation (engine thread)
     def worker(self):
@@ -252,6 +270,7 @@ class Server:
             self.st.prefill_done(job, job["reuse"], job["pf_s"])
             self.emit_tokens(job, [t])
             job["t1"] = time.time()
+            job["ds0"] = self.e.draft_stats()   # [ss16-drafter] TIER 11: the sequence's counters as its decode starts
         elif not self.activate(job):   # its K/V is gone: prefill what it has, the reply goes on from that token
             if len(ids) + len(job["out"]) + 16 > self.e.max_ctx:
                 return self.finish(job)
@@ -309,6 +328,16 @@ class Server:
               f"switches {job.get('sw', 0)}; shared prefixes made {pm} used {pu}", flush=True)
         if (st := self.e.stats()) is not None:   # [dsv4-rel6-sched] DSV4_STATS=1: engine totals since the start
             print("[dsv4] stats: passes %d tokens %d pass_ms %.1f lane_ms %.1f route_ms %.1f host_gb %.3f lane_gb %.3f" % tuple(st), flush=True)
+        self.drafter_line(job, len(ids), reuse, len(out), dt)   # [ss16-drafter] TIER 11: the SpecDecoding line
+        if (dr := self.e.drafter_stats()) is not None:   # [ss16-drafter] DSV4_DSTATS=1: what production actually did
+            kind = " ".join(f"{k} {dr[i]:.0f}" for k, i in (("spec", 0), ("lookup", 1), ("plain", 2)))
+            rows = " ".join(f"{dr[8 + j] / dr[3 + j]:.3f}" for j in range(5) if dr[3 + j] > 0) or "-"
+            gate = dr[13] / dr[0] if dr[0] > 0 else 0.0
+            t = " ".join(f"{n}:{dr[16 + n]:.1f}({dr[16 + n] / dr[15]:.2f})" for n in range(6) if dr[16 + n] > 0) or "-"
+            print(f"[dsv4] drafter (this box, cumulative since start): {kind}; gate length {gate:.2f}; "
+                  f"per-row conditional {rows}; "
+                  f"ms/token spec {dr[14]:.2f} plain {dr[15]:.2f}; T_obs[n] ms (fraction of a plain step): {t}",
+                  flush=True)
         try:   # [dsv4-qetop] the counters just read (no extra engine call but dsv4_pos)
             self.engine_counters(((na, ab, src, cnt), (kn, kv, kh, kc), (hp, hc, hn), (pm, pu), st))
         except Exception:
