@@ -3166,14 +3166,13 @@ Engine* create(const Options& opt) {
     DCK(cudaGetDeviceCount(&ndev));
     DCHECK(o.nc >= 2 && o.nc <= MAXNC, "--nc: %d is outside [2, %d]", o.nc, MAXNC);   // [ss16-nc4]
     DCHECK(ndev >= o.nc, "need %d GPUs, have %d (--nc)", o.nc, ndev);
-    // [ss16-nc4] Gated here while the four-card path is proven out. Measured on 2026-11-22: with this check lifted
-    // a four-card boot SUCCEEDS - the N-way split gives 0..10 / 11..21 / 22..33 / 34..39, the head splits 4 x 32320
-    // rows, DSpark loads on card 3 (its target layer 37 is there), and the expert tiers total 3880 slots against
-    // 2576 at three cards (1.51x) - and the FIRST REQUEST then faults in the exchange:
-    //   dsv4.cu:13155 waiting for routing pack: CUDA error unspecified launch failure (card 0)
-    // So the next gate is the N-1-peer exchange DEBUGGED at three peers, not the placement.
-    DCHECK(o.nc == 3, "ss16/nc4: --nc %d: the split, the placement and the tiers work at four cards, but the "
-                  "exchange faults on the first request (unspecified launch failure). NC = 3 is the shipped shape", o.nc);
+    // [ss16-nc4] GATE 4b LIFTED 2026-11-22: the four-card path boots, serves and is measured (02 Log ledger, gate 4b).
+    //   layers 0..10 / 11..21 / 22..33 / 34..39; head 4 x 32320 rows; DSpark on card 3; tiers 1088+1088+1120+584 =
+    //   3880 GGUF slots = 1.51x the three-card 2576; engine ready 46-54 s. Shipped shape: the pool split ON.
+    //   The last blocker was the X4 push in this file's MoE layer function, which still declared uint4* dst[2] and
+    //   filled it from a loop over cards.size() - three writes at NC = 4. The N = 3 fence is unchanged:
+    //   set_completion_sha 3d51110e0169916a, payload_set_sha 84eea1a3bd6eb96d (seventh reproduction, on this library).
+    if (o.nc != 3) logf_("ss16-nc4: NC = %d (the four-card shape is measured; see 02 Log, gate 4b)\n", o.nc);
     const int NC = o.nc;
     E->cards.resize(NC);
     const size_t XB = expert_bytes(XF_FP4);
@@ -9981,11 +9980,11 @@ static void moe_decode(Engine* E, Card& c, Layer& W, int l, int R) {
     const int* dls = E->psplit ? W.d_dls[W.card] : W.d_dslot;   // R16: the owner's pool table (local slot indices)
     if (E->xsplit || E->psplit) {   // R9: x / ids / w to the other cards first (their experts start ~5 us later)
         XSeg g4 = xseg({{xq, D, D, 0, -1}, {rids, TOPK, TOPK, 0, -1}, {rw, TOPK, TOPK, 0, -1}});
-        uint4* dst[2] = {};
+        uint4* dst[MAXNC - 1] = {};   // [ss16-nc4] one destination per other card
         int nd = 0;
         for (int j = 0; j < (int)E->cards.size(); j++)
             if (j != W.card) dst[nd++] = E->cards[j].rx4;
-        xpush(c, g4, R, dst[0], dst[1], xtag);
+        xpush_all(c, g4, R, dst, nd, xtag);
     }
     if (shs) {
         DCK(cudaEventRecord(c.ev_s0, st));
