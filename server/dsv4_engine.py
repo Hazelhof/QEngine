@@ -206,6 +206,28 @@ class CLib:
         self.L.qe_draft_stats(self.h, 0, v)
         return list(v)
 
+    @staticmethod
+    def drafter_block(dr):
+        """[ss16-drafter] the observation block as a labelled dict, for both /api/stats panels. Derived here rather
+        than in the engine, so the arithmetic is readable and the engine keeps to counting. Rates are null where the
+        denominator is zero - a division skipped is honest, a 0.0 reported as a rate is not. T_obs[n] has no sample
+        count in the first cut (a non-zero entry means at least one pass, not n of them), which is stated rather than
+        papered over: see the plan's Task 3."""
+        if not dr:
+            return None
+        spec, lk, plain = dr[0], dr[1], dr[2]
+        pl = dr[15]
+        return {"passes": {"spec": int(spec), "lookup": int(lk), "plain": int(plain)},
+                "gate_rows_per_spec_pass": round(dr[13] / spec, 3) if spec > 0 else None,
+                "per_row": {"tested": [int(x) for x in dr[3:8]], "kept": [int(x) for x in dr[8:13]],
+                            "conditional": [round(dr[8 + j] / dr[3 + j], 3) if dr[3 + j] > 0 else None for j in range(5)]},
+                "ms_per_token": {"spec_passes": round(dr[14], 2), "plain_steps": round(pl, 2)},
+                "T_obs_ms": [round(dr[16 + n], 1) for n in range(6)],
+                "T_obs_fraction_of_a_plain_step": [round(dr[16 + n] / pl, 3) if pl > 0 and dr[16 + n] > 0 else None
+                                                   for n in range(6)],
+                "ds_lam": round(dr[22], 4),
+                "ds_T_published_ms": [22.3, 29.3, 36.8, 42.3, 48.4, 54.1]}   # the author's table, shown beside ours
+
     def drafter_stats(self):   # [ss16-drafter] the DSV4_DSTATS observation block; None = the counter is off
         if not self.has_drafter:
             return None
@@ -885,6 +907,8 @@ class Dsv4Engine(SteeringMixin):
         es = c.stats()
         if es is not None:   # DSV4_STATS=1: engine totals since the start
             d["passes"] = dict(zip(("passes", "tokens", "pass_ms", "lane_ms", "route_ms", "host_gb", "lane_gb"), es))
+        if (dr := c.drafter_stats()) is not None:   # [ss16-drafter] DSV4_DSTATS=1: the drafter, in the production shape
+            d["drafter"] = CLib.drafter_block(dr)   # (stats()/drafter_stats() are CLib's: the ctypes wrapper)
         return {"pool_tokens": 0, "max_context": self.max_t, "slots": slots, "conversations": [],
                 "archives": {"ram": na, "ram_bytes": ab, "disk": 0, "disk_bytes": 0, "pinned_bytes": hp * 1e6, "pinned_used": 0},
                 "events": {"grow": 0, "move": kc[1], "evict": kc[3], "pause": 0, "resume": cnt[1]}, "paused": 0, "dsv4": d}

@@ -843,8 +843,8 @@ void qe_draft_stats(void* p, int slot, long long* out) {
 // [ss16-drafter] DSV4_DSTATS=1: the drafter's observation block, measured on this box. Fixed layout, 24 doubles:
 //   [0..2]   passes by kind: DSpark verify / prompt lookup / plain step (the census DACC cannot report: it forces
 //            dspark_adapt = 0 and no lookup, so every position is a full block)
-//   [3..7]   rows tested at position 0..4     [8..12] rows kept there (the conditional series DACC reports, from the
-//            production pass: g_conf records only up to the first rejection, so it cannot give this)
+//   [3..7]   rows tested at position 0..4     [8..12] rows kept there (per-row conditional acceptance in the
+//            production pass - g_conf is a confidence-bucketed calibration and skips lookup passes, so it has no row axis)
 //   [13]     draft rows the gate chose, summed over DSpark passes (gate length = [13] / [0])
 //   [14]     ds_ms_spec   [15] ds_ms_plain    the judge's own two EMAs: the passes' and the plain steps' ms/token
 //   [16..21] ds_Tobs[0..5]: ms per pass verifying n drafts, EWMA measured here, seeded by its first sample

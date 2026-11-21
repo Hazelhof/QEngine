@@ -12986,9 +12986,11 @@ int decode_spec(Engine* E, int t, std::vector<int>& out, StepTimes* tm, int cap)
         E->ds_Tobs[nn] = E->ds_Tn[nn] > 0 ? 0.75 * E->ds_Tobs[nn] + 0.25 * pms : pms;   // seeded by its first sample
         E->ds_Tn[nn]++;
         if (!use_lk) E->ds_gate += nd;   // the gate's chosen length, summed over DSpark passes (ds_kind[0] is their count)
-        for (int j = 0; j < nd; j++) { E->ds_tried[j]++; E->ds_ok[j] += a > j; }
-        // ^ the per-row conditional series DACC reports. g_conf (:12897) cannot give it: its loop stops at j <= a, so a
-        // row that was tested and rejected past the first miss is never recorded. That is the one genuinely new field.
+        for (int j = 0; j < nd && j <= a; j++) { E->ds_tried[j]++; E->ds_ok[j] += a > j; }
+        // ^ the per-row conditional series, as DACC records it (i <= min(L,4) at :11893): verification is sequential, so
+        // row j is tested only when every row before it was accepted, and the first rejected row is tested but not kept.
+        // g_conf (:12897) already guards this correctly and cannot answer the question for a different reason: it
+        // buckets by confidence and skips lookup passes, so it is a calibration of the confidence, not a row series.
     }
     if (E->o.dspark_adapt && !plain_mode) {   // R8: per-token cost of this pass (incl. its draft) vs the plain steps' running cost
         double mt = ms_since(t0) / (a + 1);

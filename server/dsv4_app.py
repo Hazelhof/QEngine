@@ -124,6 +124,8 @@ class Server:
              "prefix": {"made": pm, "used": pu}}
         if es is not None:   # DSV4_STATS=1: engine totals since the start
             d["passes"] = dict(zip(("passes", "tokens", "pass_ms", "lane_ms", "route_ms", "host_gb", "lane_gb"), es))
+        if (dr := self.e.drafter_stats()) is not None:   # [ss16-drafter] the drafter's own block, labelled the same way
+            d["drafter"] = Engine.drafter_block(dr)   # (dsv4_app.py: `from dsv4_engine import CLib as Engine`)
         self.st.engine(d)
 
     def drafter_line(self, job, prompt, cached, completion, decode_s):
