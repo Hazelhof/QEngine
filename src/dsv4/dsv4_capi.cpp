@@ -75,6 +75,10 @@ bool parse(const char* args, Options& o, std::string& err) {
         else if (a == "--kv-pool-mib") o.kv_pool_mib = std::max(0, atoi(v.c_str()));   // [dsv4-rel4-p2]
         else if (a == "--dspark") o.dspark = atoi(v.c_str());
         else if (a == "--dspark-tau") o.dspark_tau = (float)atof(v.c_str());
+        // [ss16-drafter] R8's judge, reachable from the server for the first time. ds4_run has had --dspark-adapt
+        // (dsv4_main.cpp:133) and the C API - the only door the server has - did not, and an unknown flag is a hard
+        // error here, so this was unreachable rather than merely unset. 0 = off, unchanged unless passed.
+        else if (a == "--dspark-adapt") o.dspark_adapt = atoi(v.c_str());
         else if (a == "--car-margin") o.car_margin = (float)atof(v.c_str());
         else if (a == "--drop-w") {   // [dsv4-rel2-dropw] 0 = exact routing (all 6); review dsv4_rel2 rel2b L1: validated
             char* end = nullptr;
