@@ -3875,7 +3875,27 @@ Engine* create(const Options& opt) {
             f.s = ds;
             return f;
         };
-        const int NNr[3] = {1696, 1728, 1696};
+        // [ss16-nc4] the share PARTITION was three-card arithmetic: the owner took 2 of the 8 head groups and the
+        // others 3 each, and wo_b was split 1696 / 1728 / 1696. Both are now functions of NC, written so that at
+        // NC = 3 they reproduce those exact numbers - the identity leg at N=3 is this gate's proof, and a different
+        // per-card row count would break it even though the totals still matched.
+        int ngv[MAXNC] = {}, nnv[MAXNC] = {};
+        {
+            const int owner_g = OG / NC;                                   // 3 cards: 2 head groups
+            const int rest_g = (NC > 1) ? (OG - owner_g) / (NC - 1) : OG;  // 3 cards: 3 head groups each
+            DCHECK(owner_g > 0 && owner_g + rest_g * (NC - 1) == OG,
+                   "the %d attention groups do not divide over %d cards", OG, NC);
+            const int owner_n = (D / NC / 32) * 32;                        // 3 cards: 1696 wo_b rows (32-aligned)
+            DCHECK(owner_n >= 32, "the %d wo_b rows do not split over %d cards", D, NC);
+            int rem = D - owner_n;
+            ngv[0] = owner_g;
+            nnv[0] = owner_n;
+            for (int i = 1; i < NC; i++) {
+                ngv[i] = rest_g;
+                if (i == NC - 1) { nnv[i] = rem; }                          // the last takes the floor
+                else { const int s = ((rem + (NC - i) * 32 - 1) / ((NC - i) * 32)) * 32; nnv[i] = s; rem -= s; }
+            }
+        }
         for (int l = 0; l < NL; l++) {
             Layer& W = E->L[l];
             int order[MAXNC] = {W.card, -1, -1, -1}, q = 1;
@@ -3886,9 +3906,9 @@ Engine* create(const Options& opt) {
                 const int k = order[i];
                 Layer::AShare& A = W.ash[k];
                 A.g0 = g0;
-                A.ng = i == 0 ? 2 : 3;
+                A.ng = ngv[i];
                 A.n0 = n0;
-                A.nn = NNr[i];
+                A.nn = nnv[i];
                 g0 += A.ng;
                 n0 += A.nn;
                 std::string a = "layers." + std::to_string(l) + ".attn.";
