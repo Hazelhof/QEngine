@@ -216,15 +216,27 @@ class CLib:
         if not dr:
             return None
         spec, lk, plain = dr[0], dr[1], dr[2]
-        pl = dr[15]
+        t = [dr[16 + n] for n in range(6)]
+        # the reference a row is priced against: the judge's own plain-step EMA when it has one, else the 1-row pass.
+        # Dividing by a zero is how Q5's number disappeared on the first boot; a null is not an answer either.
+        ref = dr[15] if dr[15] > 0 else (t[0] if t[0] > 0 else 0.0)
         return {"passes": {"spec": int(spec), "lookup": int(lk), "plain": int(plain)},
                 "gate_rows_per_spec_pass": round(dr[13] / spec, 3) if spec > 0 else None,
                 "per_row": {"tested": [int(x) for x in dr[3:8]], "kept": [int(x) for x in dr[8:13]],
                             "conditional": [round(dr[8 + j] / dr[3 + j], 3) if dr[3 + j] > 0 else None for j in range(5)]},
-                "ms_per_token": {"spec_passes": round(dr[14], 2), "plain_steps": round(pl, 2)},
-                "T_obs_ms": [round(dr[16 + n], 1) for n in range(6)],
-                "T_obs_fraction_of_a_plain_step": [round(dr[16 + n] / pl, 3) if pl > 0 and dr[16 + n] > 0 else None
-                                                   for n in range(6)],
+                # null, not 0.00: these are the judge's EMAs and they stay at zero until dspark_adapt runs. A zero
+                # printed as a rate is a claim that a step is free.
+                "judge": ("off - dspark_adapt has not calibrated (ds_plain never ran); the gate alone chose the rows"
+                          if dr[14] <= 0 and dr[15] <= 0 else "on"),
+                "ms_per_token": {"spec_passes": round(dr[14], 2) if dr[14] > 0 else None,
+                                 "plain_steps": round(dr[15], 2) if dr[15] > 0 else None},
+                "T_obs_ms": [round(x, 1) for x in t],
+                "T_obs_reference": ("judge_plain_ms_per_token" if dr[15] > 0 else "one_row_pass_ms"),
+                "T_obs_fraction_of_the_reference": [round(t[n] / ref, 3) if ref > 0 and t[n] > 0 else None
+                                                    for n in range(6)],
+                # the drafter law's cost side, per verified row: (pass(n) - pass(0)) / n / pass(0)
+                "row_cost_fraction_of_a_step": [round((t[n] - t[0]) / n / t[0], 3)
+                                                if n > 0 and t[0] > 0 and t[n] > 0 else None for n in range(6)],
                 "ds_lam": round(dr[22], 4),
                 "ds_T_published_ms": [22.3, 29.3, 36.8, 42.3, 48.4, 54.1]}   # the author's table, shown beside ours
 
