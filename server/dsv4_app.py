@@ -335,7 +335,12 @@ class Server:
             kind = " ".join(f"{k} {dr[i]:.0f}" for k, i in (("spec", 0), ("lookup", 1), ("plain", 2)))
             rows = " ".join(f"{dr[8 + j] / dr[3 + j]:.3f}" for j in range(5) if dr[3 + j] > 0) or "-"
             gate = dr[13] / dr[0] if dr[0] > 0 else 0.0
-            t = " ".join(f"{n}:{dr[16 + n]:.1f}({dr[16 + n] / dr[15]:.2f})" for n in range(6) if dr[16 + n] > 0) or "-"
+            # the fraction needs a plain-step EMA to divide by, and the judge-off arm (--dspark-adapt 0) never runs a
+            # plain step, so dr[15] is zero there: print the absolute T_obs and a dash rather than raising. This line
+            # used to divide unguarded and turned every judge-off request into a 500 AFTER generation (2026-11-22).
+            t = (" ".join(f"{n}:{dr[16 + n]:.1f}({dr[16 + n] / dr[15]:.2f})" for n in range(6) if dr[16 + n] > 0)
+                 if dr[15] > 0 else
+                 " ".join(f"{n}:{dr[16 + n]:.1f}(-)" for n in range(6) if dr[16 + n] > 0)) or "-"
             print(f"[dsv4] drafter (this box, cumulative since start): {kind}; gate length {gate:.2f}; "
                   f"per-row conditional {rows}; "
                   f"ms/token spec {dr[14]:.2f} plain {dr[15]:.2f}; T_obs[n] ms (fraction of a plain step): {t}",
