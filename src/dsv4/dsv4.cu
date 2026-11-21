@@ -3166,15 +3166,15 @@ Engine* create(const Options& opt) {
     DCK(cudaGetDeviceCount(&ndev));
     DCHECK(o.nc >= 2 && o.nc <= MAXNC, "--nc: %d is outside [2, %d]", o.nc, MAXNC);   // [ss16-nc4]
     DCHECK(ndev >= o.nc, "need %d GPUs, have %d (--nc)", o.nc, ndev);
-    // [ss16-nc4] the card-count INFRASTRUCTURE is in: the option, the per-card array extents grown to
-    // MAXNC, and a static_assert at each grown site so a missed or reverted one is a build failure with a
-    // name. What is NOT in is the two things that carry three-card ARITHMETIC: the attention-share
-    // partition (A.ng = i == 0 ? 2 : 3, and NNr[3] = {1696, 1728, 1696} — a three-way split of the wo_b
-    // rows) and the split's exchange (uint4* dst[2] / int js[2] and xpush(..., dst[0], dst[1], ...) — two
-    // named peer queues). Until each is generalised, refuse at start rather than index past them or push to
-    // a queue that was never filled. Each gate lifts with its own commit, identity at N=3 re-proved each time.
-    DCHECK(o.nc == 3, "ss16/nc4: --nc %d needs the attention-share partition and the N-1-peer exchange "
-                  "generalised (not yet); NC = 3 is the shipped shape", o.nc);
+    // [ss16-nc4] The four-card path is gated here, and the gate now names what a MEASURED NC = 4 attempt hits:
+    // a scratch build with this DCHECK lifted boots, plans layers 0..12 / 13..25 / 26..39 / (none) over four cards,
+    // splits the head 4 x 32320 rows, and then aborts at dsv4.cu:2680 -
+    //   DSpark: target layer 37 is not on the last card  -  because the drafter is anchored to cards[NC-1] while
+    //   its target layer 37 lives on card 2 once the split is four-wide.
+    // So the next gate is the DSpark PLACEMENT (put the drafter's head on the card that owns DS_T0, or force DS_T0's
+    // layer onto the last card), not the exchange - the exchange is generalised and identity-proved at N = 3.
+    DCHECK(o.nc == 3, "ss16/nc4: --nc %d needs the DSpark placement generalised (its target layer must sit on the "
+                  "last card today); the exchange and the share partition are done. NC = 3 is the shipped shape", o.nc);
     const int NC = o.nc;
     E->cards.resize(NC);
     const size_t XB = expert_bytes(XF_FP4);
@@ -3978,7 +3978,7 @@ Engine* create(const Options& opt) {
             DCK(cudaMemcpy(E->head, h.data, h.nbytes, cudaMemcpyHostToDevice));
         }
         E->fnorm = up_f32(st.get("norm.weight"));
-        for (size_t k = 0; k < E->cards.size() && k < 3; k++) {
+    for (size_t k = 0; k < E->cards.size(); k++) {   // [ss16-nc4] every card, not the first three
             DevGuard dg(E->cards[k].dev);
             DCK(cudaEventCreateWithFlags(&E->ev_probe[k], cudaEventDisableTiming));
         }
@@ -6987,8 +6987,17 @@ static void xseg_add(XSeg& g, void* p, int ld, int w, int nr) {
     g.tot += w;
     g.wpr = (g.tot + 2) / 3;
 }
+// [ss16-nc4] N - 1 destinations. Two go out in one launch exactly as the three-card shape does; a THIRD adds one
+// store to the same launch, so nothing about the N = 3 path changes (identity proved on the boot, not by argument).
+static void xpush3(Card& c, const XSeg& g, int n, uint4* d0, uint4* d1, uint4* d2, unsigned tag) {
+    k_xpush<<<cdiv((size_t)n * g.wpr, 128), 128, 0, c.st>>>(g, n, d0, d1, d2, tag);
+}
+static void xpush_all(Card& c, const XSeg& g, int n, uint4* const* dst, int nd, unsigned tag) {
+    if (nd <= 0) return;
+    xpush3(c, g, n, dst[0], nd > 1 ? dst[1] : nullptr, nd > 2 ? dst[2] : nullptr, tag);
+}
 static void xpush(Card& c, const XSeg& g, int n, uint4* d0, uint4* d1, unsigned tag) {
-    k_xpush<<<cdiv((size_t)n * g.wpr, 128), 128, 0, c.st>>>(g, n, d0, d1, tag);
+    k_xpush<<<cdiv((size_t)n * g.wpr, 128), 128, 0, c.st>>>(g, n, d0, d1, nullptr, tag);
 }
 static void xpull(Card& c, const XSeg& g, int n, const uint4* src, unsigned tag) {
     k_xpull<<<cdiv((size_t)n * g.wpr, 128), 128, 0, c.st>>>(g, n, src, tag);
@@ -7019,7 +7028,7 @@ static const bool E_x2q_off = getenv("DSV4_NOX2Q") != nullptr;
 // every card's int8 scratch allocated)
 static bool x2q_on(const Engine* E, const Layer& W, int n) {
     if (E_x2q_off || n > MAXR) return false;
-    for (int j = 0; j < (int)E->cards.size() && j < 3; j++)
+    for (int j = 0; j < (int)E->cards.size(); j++)   // [ss16-nc4] every card, not the first three
         if (!W.ash[j].wo_b.sq || W.ash[j].ng <= 0 || !E->cards[j].d_di8) return false;
     return true;
 }
@@ -7058,9 +7067,9 @@ static void attn_share(Engine* E, Card& k, int ki, const Layer& W, int l, int s,
         linq(k, A.wo_a, o + (size_t)A.g0 * AT_HG * HD, NH * HD, n, o2 + (size_t)A.g0 * OLR, OG * OLR, OLR,
              oq ? oq + (size_t)h0 * HD : nullptr);
         // X2: my o2 columns to the other two cards
-        uint4* dst[2] = {};
+        uint4* dst[MAXNC - 1] = {};   // [ss16-nc4] one destination per other card
         int nd = 0;
-        for (int j = 0; j < 3; j++)
+        for (int j = 0; j < (int)E->cards.size(); j++)
             if (j != ki) dst[nd++] = E->cards[j].rx2 + (size_t)ki * MAXR * X2W;
         if (x2q_on(E, W, n)) {   // [dsv4-dec2-x2q]: my columns as wo_b's int8 input (k_q8r's values), sent int8 + scales
             int8_t* q = k.d_di8 + (size_t)A.g0 * OLR;
@@ -7068,16 +7077,16 @@ static void attn_share(Engine* E, Card& k, int ki, const Layer& W, int l, int s,
             const int kc = A.ng * OLR;
             k_q8rs<<<cdiv((size_t)n * kc, 256), 256, 0, st>>>(o2 + (size_t)A.g0 * OLR, OG * OLR, n, kc, q, OG * OLR, qs,
                                                               OG * OLR / 32);
-            xpush(k, xseg({{q, OG * OLR / 4, kc / 4, 0, -1}, {qs, OG * OLR / 32, kc / 32, 0, -1}}), n, dst[0], dst[1], tag + 1);
+            xpush_all(k, xseg({{q, OG * OLR / 4, kc / 4, 0, -1}, {qs, OG * OLR / 32, kc / 32, 0, -1}}), n, dst, nd, tag + 1);
             return;
         }
-        xpush(k, xseg({{o2 + (size_t)A.g0 * OLR, OG * OLR, A.ng * OLR, 0, -1}}), n, dst[0], dst[1], tag + 1);
+        xpush_all(k, xseg({{o2 + (size_t)A.g0 * OLR, OG * OLR, A.ng * OLR, 0, -1}}), n, dst, nd, tag + 1);
         return;
     }
     const bool x2q = x2q_on(E, W, n);
     {   // theirs into mine (R10: both peers in one launch)
-        int js[2], nj = 0;
-        for (int j = 0; j < 3; j++)
+        int js[MAXNC], nj = 0;   // [ss16-nc4] one entry per other card
+        for (int j = 0; j < (int)E->cards.size(); j++)
             if (j != ki) js[nj++] = j;
         const Layer::AShare &B0 = W.ash[js[0]], &B1 = W.ash[js[1]];
         if (x2q) {   // [dsv4-dec2-x2q]: their int8 columns + scales straight into wo_b's input
@@ -7090,6 +7099,16 @@ static void attn_share(Engine* E, Card& k, int ki, const Layer& W, int l, int s,
         xpull2(k, xseg({{o2 + (size_t)B0.g0 * OLR, OG * OLR, B0.ng * OLR, 0, -1}}), k.rx2 + (size_t)js[0] * MAXR * X2W,
                xseg({{o2 + (size_t)B1.g0 * OLR, OG * OLR, B1.ng * OLR, 0, -1}}), k.rx2 + (size_t)js[1] * MAXR * X2W, n,
                tag + 1);
+        for (int q = 2; q < nj; q++) {   // [ss16-nc4] peers beyond the second (NC > 3)
+            const Layer::AShare& Bq = W.ash[js[q]];
+            if (x2q)
+                xpull(k, xseg({{k.d_di8 + (size_t)Bq.g0 * OLR, OG * OLR / 4, Bq.ng * OLR / 4, 0, -1},
+                              {k.d_di8s + (size_t)Bq.g0 * OLR / 32, OG * OLR / 32, Bq.ng * OLR / 32, 0, -1}}),
+                      n, k.rx2 + (size_t)js[q] * MAXR * X2W, tag + 1);
+            else
+                xpull(k, xseg({{o2 + (size_t)Bq.g0 * OLR, OG * OLR, Bq.ng * OLR, 0, -1}}),
+                      n, k.rx2 + (size_t)js[q] * MAXR * X2W, tag + 1);
+        }
     }
     const bool own = ki == W.card;
     float* y = own ? k.ao + A.n0 : k.d_ysl;
@@ -7118,11 +7137,11 @@ static void attn_split(Engine* E, Card& c, const Layer& W, int l, int s, int n, 
         xseg_add(g1, c.src[csi].ckv + (size_t)cg0 * HD, HD / 2, HD / 2, cng);
         xseg_add(g1, c.src[csi].ik + (size_t)cg0 * IDIM, IDIM / 2, IDIM / 2, cng);
     }
-    uint4* dst[2] = {};
+    uint4* dst[MAXNC - 1] = {};   // [ss16-nc4] one destination per other card
     int nd = 0;
-    for (int j = 0; j < 3; j++)
+    for (int j = 0; j < (int)E->cards.size(); j++)
         if (j != oi) dst[nd++] = E->cards[j].rx1;
-    xpush(c, g1, n, dst[0], dst[1], tag);
+    xpush_all(c, g1, n, dst, nd, tag);
     auto share = [&](int j, int stage) {
         Card& k = E->cards[j];
         DCK(cudaSetDevice(k.dev));
@@ -7141,27 +7160,30 @@ static void attn_split(Engine* E, Card& c, const Layer& W, int l, int s, int n, 
     };
     int ord[MAXNC], no = 0;   // stages 0, 1: owner first; stage 2: the others first (the owner then waits for their X3)
     ord[no++] = oi;
-    for (int j = 0; j < 3; j++)
+    for (int j = 0; j < (int)E->cards.size(); j++)
         if (j != oi) ord[no++] = j;
     if (E_astage_off) {
-        for (int i = 1; i < 3; i++)
+        for (int i = 1; i < (int)E->cards.size(); i++)
             for (int stg = 0; stg < 3; stg++) share(ord[i], stg);
         for (int stg = 0; stg < 3; stg++) share(oi, stg);
     } else {
         for (int stg = 0; stg < 2; stg++)
-            for (int i = 0; i < 3; i++) share(ord[i], stg);
-        share(ord[1], 2);
-        share(ord[2], 2);
+            for (int i = 0; i < (int)E->cards.size(); i++) share(ord[i], stg);
+        for (int i = 1; i < (int)E->cards.size(); i++) share(ord[i], 2);   // [ss16-nc4] every other card
+
         share(oi, 2);
     }
     DCK(cudaSetDevice(c.dev));
     {   // X3: the other cards' wo_b rows into c.ao (R10: one launch)
-        int js[2], nj = 0;
-        for (int j = 0; j < 3; j++)
+        int js[MAXNC], nj = 0;   // [ss16-nc4]
+        for (int j = 0; j < (int)E->cards.size(); j++)
             if (j != oi) js[nj++] = j;
         const Layer::AShare &B0 = W.ash[js[0]], &B1 = W.ash[js[1]];
         xpull2(c, xseg({{c.ao + B0.n0, D, B0.nn, 0, -1}}), c.rx3 + (size_t)js[0] * MAXR * X3W,
                xseg({{c.ao + B1.n0, D, B1.nn, 0, -1}}), c.rx3 + (size_t)js[1] * MAXR * X3W, n, tag + 2);
+        for (int q = 2; q < nj; q++)   // [ss16-nc4] the owner's gather beyond the second source
+            xpull(c, xseg({{c.ao + W.ash[js[q]].n0, D, W.ash[js[q]].nn, 0, -1}}),
+                  n, c.rx3 + (size_t)js[q] * MAXR * X3W, tag + 2);
     }
 }
 // [dsv4-rel2-p1] (see kv_bytes)

@@ -4521,7 +4521,7 @@ __device__ __forceinline__ void ll_gate(const uint4* first, bool have, unsigned 
 __device__ __forceinline__ void ll_store(uint4* p, uint32_t a, uint32_t b, uint32_t c, unsigned tag) {
     asm volatile("st.volatile.global.v4.u32 [%0], {%1, %2, %3, %4};" ::"l"(p), "r"(a), "r"(b), "r"(c), "r"(tag) : "memory");
 }
-__global__ void k_xpush(const __grid_constant__ XSeg g, int R, uint4* d0, uint4* d1, unsigned tag) {
+__global__ void k_xpush(const __grid_constant__ XSeg g, int R, uint4* d0, uint4* d1, uint4* d2, unsigned tag) {
     const int w = blockIdx.x * blockDim.x + threadIdx.x;
     if (w >= R * g.wpr) return;
     const int r = w / g.wpr, k0 = (w % g.wpr) * 3;
@@ -4534,6 +4534,7 @@ __global__ void k_xpush(const __grid_constant__ XSeg g, int R, uint4* d0, uint4*
     }
     asm volatile("st.volatile.global.v4.u32 [%0], {%1, %2, %3, %4};" ::"l"(d0 + w), "r"(v[0]), "r"(v[1]), "r"(v[2]), "r"(tag) : "memory");
     if (d1) asm volatile("st.volatile.global.v4.u32 [%0], {%1, %2, %3, %4};" ::"l"(d1 + w), "r"(v[0]), "r"(v[1]), "r"(v[2]), "r"(tag) : "memory");
+    if (d2) asm volatile("st.volatile.global.v4.u32 [%0], {%1, %2, %3, %4};" ::"l"(d2 + w), "r"(v[0]), "r"(v[1]), "r"(v[2]), "r"(tag) : "memory");
 }
 __global__ void k_xpull(const __grid_constant__ XSeg g, int R, const uint4* src, unsigned tag) {
     const int w = blockIdx.x * blockDim.x + threadIdx.x;
