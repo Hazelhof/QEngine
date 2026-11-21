@@ -71,6 +71,7 @@ bool parse(const char* args, Options& o, std::string& err) {
         else if (a == "--cache-dir") o.cache_dir = v;
         else if (a == "--profile") o.profile = v;
         else if (a == "--ctx") o.maxctx = atoi(v.c_str());
+        else if (a == "--nc") o.nc = atoi(v.c_str());   // [ss16-nc4] card count; 2..MAXNC, default 3
         else if (a == "--ctx-static") o.ctx_static = std::max(0, atoi(v.c_str()));   // [dsv4-rel8-ctxdef]
         else if (a == "--kv-pool-mib") o.kv_pool_mib = std::max(0, atoi(v.c_str()));   // [dsv4-rel4-p2]
         else if (a == "--dspark") o.dspark = atoi(v.c_str());

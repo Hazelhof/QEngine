@@ -40,6 +40,7 @@
     } while (0)
 
 namespace dsv4 {
+constexpr int MAXNC = 4;   // [ss16-nc4] card-array extent; see the static_asserts in dsv4.cu
 
 // [kb-dsv4-ctxgrow] the context K/V of a request could not grow (lazy reservation, its VRAM taken by another process):
 // thrown by the forward paths before anything moves; the C API fails that request instead of aborting the engine
@@ -155,6 +156,9 @@ struct Options {
     std::string cache_dir;       // derived data (expert profile, drafter repack); default $XDG_CACHE_HOME or ~/.cache /qengine/dsv4
     std::string profile;         // [dsv4-rel-gguf]: starting expert profile (a dsv4-profile file or a pack.json) when the
                                  // cache has none yet
+    // [ss16-nc4] the largest card count the per-card arrays are sized for; nc is the count this
+    // start uses. Both default to the engine's long-standing three-card shape.
+    int nc = 3;
     int maxctx = 16384;          // window / compressed KV capacity
     int ctx_static = 0;          // [dsv4-rel8-ctxdef] > 0: maxctx is the server's default (not the user's): with the static
                                  // context reservation (no lazy one: no peer access between every pair, DSV4_NOCTXLAZY)

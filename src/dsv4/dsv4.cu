@@ -175,8 +175,8 @@ struct Layer {
     bool kvs_on = false;                      //   a prefill call holds the scratch (kv_in .. kv_out)
     bf16* kvsnap = nullptr;                   // [dsv4-rel2-p1] the ring at the prompt-end snapshot (ring mode)
     int* d_slot = nullptr;                    // [NE] global slot (card * GS + index) or -1, on the owner (routing: CAR, prediction)
-    int* d_ls[3] = {};                        // R9: [NE] slot index on card k or -1, on card k (the GEMV kernels read it)
-    int* d_dls[3] = {};                       // R16 pool split: [NE] pool slot index on card k or -1, on card k
+    int* d_ls[MAXNC] = {};                        // R9: [NE] slot index on card k or -1, on card k (the GEMV kernels read it)
+    int* d_dls[MAXNC] = {};                       // R16 pool split: [NE] pool slot index on card k or -1, on card k
     std::vector<int> h_slot;                  // global slot or -1
     std::vector<int8_t> hfmt;                 // host tier format per expert (-1: no host copy)
     std::vector<const uint8_t*> hx;           // host copy per expert
@@ -213,7 +213,13 @@ struct Layer {
         F8 wq_b, wo_a, wo_b;
         float* sink = nullptr;
         bf16* ring = nullptr;   // other cards: window KV ring [ARING][512] (position p at row p % ARING)
-    } ash[3];
+    } ash[MAXNC];
+    // [ss16-nc4] the card-extent audit: these three are indexed by card id in `for (k = 0; k < NC; ...)`
+    // loops, so a site left at [3] beside NC = 4 would write past the struct. The compiler owns the list
+    // from here: a reverted or missed grow is a build failure with a name, not a 3 a.m. GPU fault.
+    static_assert(std::extent_v<decltype(d_ls)> == MAXNC, "Layer::d_ls must be MAXNC wide (card-indexed)");
+    static_assert(std::extent_v<decltype(d_dls)> == MAXNC, "Layer::d_dls must be MAXNC wide (card-indexed)");
+    static_assert(std::extent_v<decltype(ash)> == MAXNC, "Layer::ash must be MAXNC wide (card-indexed)");
 };
 constexpr int ARING = 256;                    // >= WIN + MAXR
 constexpr int X1W = (QLR + HD / 2 + ITOPK + HD / 2 + IDIM / 2 + 2) / 3, X2W = 3 * OLR / 3, X3W = 1728 / 3;   // LL12 words per row
@@ -927,15 +933,15 @@ public:
     bf16* h_emb = nullptr;       // pinned staging [chunk][5120]
     bf16* head = nullptr;        // on the last card (without the head split)
     bool hsplit = false;         // R9: head rows [hr[k], hr[k+1]) on card k
-    bf16* head_k[3] = {};
-    int hr[4] = {};
-    cudaEvent_t ev_hx = nullptr, ev_hd[3] = {};
-    cudaEvent_t ev_probe[3] = {};   // review r9 M4: never recorded (context error probe of the host spins); r10 L3: per card
+    bf16* head_k[MAXNC] = {};
+    int hr[MAXNC + 1] = {};
+    cudaEvent_t ev_hx = nullptr, ev_hd[MAXNC] = {};
+    cudaEvent_t ev_probe[MAXNC] = {};   // review r9 M4: never recorded (context error probe of the host spins); r10 L3: per card
     // R10 whole-step decode graph (one multi-device graph per step parity, captured one step ahead on the enqueue
     // thread; per-step parameters come from the capture through cudaGraphExecUpdate, instantiate on a topology change)
     struct GSlot {
-        cudaGraphExec_t ex[3] = {};      // R10: one single-device graph per card (no cross-card edges)
-        cudaGraph_t pend[3] = {};      // captured graph whose update failed in a capture beside a running step: it is
+        cudaGraphExec_t ex[MAXNC] = {};      // R10: one single-device graph per card (no cross-card edges)
+        cudaGraph_t pend[MAXNC] = {};      // captured graph whose update failed in a capture beside a running step: it is
                                          // instantiated at the boundary (instantiate / exec destroy while a step graph
                                          // waits for the lane deadlocked: R10-4)
         bool ready = false;              // captured for position s, not launched yet
@@ -1049,12 +1055,25 @@ public:
     GmState* gm = nullptr;   // release prep [dsv4-rel-gguf]: --gguf (the whole model from the GGUF), else null
     std::vector<std::vector<double>> use_cnt;   // [dsv4-rel-gguf]: routed-expert counts (learned profile, decayed)
     bool eg_q6k = false;     // [dsv4-rel-gguf]: Engram rows are the GGUF's Q6_K (210 B), else the checkpoint's FP8
-    F8 head_q, head_qk[3];   // [dsv4-rel-q8]: Q8_0 head (whole / per-card rows with the head split)
+    F8 head_q, head_qk[MAXNC];   // [dsv4-rel-q8]: Q8_0 head (whole / per-card rows with the head split)
     void* samp = nullptr;    // [dsv4-rel-sample]: sampler block on the last card (null / !samp_on: greedy)
     bool samp_on = false;
     int* h_emit = nullptr;   // pinned: the sampled acceptance [count, tokens]
     float* h_hx = nullptr;             // [dsv4-rel-hostx]: the head input rows in mapped host memory (no-P2P head split)
-    float* h_hl[3] = {};               // the other cards' logit slices on their way to the last card (pinned)
+    float* h_hl[MAXNC] = {};               // the other cards' logit slices on their way to the last card (pinned)
+    // [ss16-nc4] the card-extent audit for Engine's per-card arrays (and the NC + 1 head-row boundary
+    // vector). Not grown on purpose, and not card-shaped: kvh_n[3] is the host-buffer KIND count
+    // (reused / pinned / pageable), Layer M[3] is the DSpark draft head's three STAGES, ds_kind[3] is
+    // the PASS kind (verify / lookup / plain), and Card's stg_w[3] / stg_s[3] are the three WEIGHTS
+    // (wq_b / wo_a / wo_b) — the census called the last of these per-card and was wrong.
+    static_assert(std::extent_v<decltype(head_k)> == MAXNC, "Engine::head_k must be MAXNC wide (per card)");
+    static_assert(std::extent_v<decltype(hr)> == MAXNC + 1, "Engine::hr holds NC + 1 head-row boundaries");
+    static_assert(std::extent_v<decltype(ev_hd)> == MAXNC, "Engine::ev_hd must be MAXNC wide (per card)");
+    static_assert(std::extent_v<decltype(ev_probe)> == MAXNC, "Engine::ev_probe must be MAXNC wide (per card)");
+    static_assert(std::extent_v<decltype(GSlot::ex)> == MAXNC, "GSlot::ex must be MAXNC wide (one graph per card)");
+    static_assert(std::extent_v<decltype(GSlot::pend)> == MAXNC, "GSlot::pend must be MAXNC wide (per card)");
+    static_assert(std::extent_v<decltype(head_qk)> == MAXNC, "Engine::head_qk must be MAXNC wide (per card)");
+    static_assert(std::extent_v<decltype(h_hl)> == MAXNC, "Engine::h_hl must be MAXNC wide (per card)");
     // R13 swap tier: free host FP4 expert buffers (own = separately allocated), homes for evicted experts without a
     // host copy; an admitted FP4-host expert gives its buffer back once resident
     bool swap = false;
@@ -1468,12 +1487,12 @@ static inline void DPT(const char* lab, cudaStream_t st) {
     DCK(cudaEventRecord(g_dev[g_dn], st));
     g_dlab[g_dn++] = lab;
 }
-static cudaEvent_t g_dhe[3][2];   // R22: the head GEMV share of cards 0 / 1 on their own streams (draft calls)
+static cudaEvent_t g_dhe[MAXNC][2];   // R22: the head GEMV share of cards 0 / 1 on their own streams (draft calls)
 static bool g_dhon = false;
 // R23 [dsv4-r23-hgap] DSV4_HPROF=1: every eager head GEMV (target verify / one-row, drafter) timed per card on its own
 // stream by cudaEvents (only the GEMV: after the x hand-off wait), read one call later (no host sync added)
 static const bool E_hprof = getenv("DSV4_HPROF") != nullptr;
-struct HProf { cudaEvent_t e[3][2] = {}; int kind = -1, m = 0, nc = 0; };   // kind 0 target, 1 drafter
+struct HProf { cudaEvent_t e[MAXNC][2] = {}; int kind = -1, m = 0, nc = 0; };   // kind 0 target, 1 drafter
 static HProf g_hp[2];
 static int g_hpi = 0;
 static double g_hpacc[2][MAXR + 1][3] = {};
@@ -1516,7 +1535,7 @@ static void hp_read(HProf& h) {
     g_hpn[h.kind][h.m]++;
     h.kind = -1;
 }
-static double g_dhacc[3] = {};
+static double g_dhacc[MAXNC] = {};
 static int* g_drids = nullptr;   // R22 profile: the drafter's routing per stage (pinned host, 3 x 48 ints)
 static long g_dpairs = 0, g_ddist = 0, g_dstages = 0;
 static void dp_close() {   // after the stream sync
@@ -1714,7 +1733,7 @@ static const char* MTAG[] = {"context/other", "workspaces (prefill + decode)", "
                              "slot tables / small"};
 constexpr int NMTAG = 11;
 static int g_mtag = 0;
-static double g_mb[3][NMTAG] = {};
+static double g_mb[MAXNC][NMTAG] = {};
 static void* dmalloc(size_t b) {
     void* p = nullptr;
     DCK(cudaMalloc(&p, std::max<size_t>(b, 16)));
@@ -3145,8 +3164,18 @@ Engine* create(const Options& opt) {
     // ---- layer split by memory (estimate): per-layer non-expert bytes + hot experts of the converter's set
     int ndev = 0;
     DCK(cudaGetDeviceCount(&ndev));
-    DCHECK(ndev >= 3, "need 3 GPUs, have %d", ndev);
-    const int NC = 3;
+    DCHECK(o.nc >= 2 && o.nc <= MAXNC, "--nc: %d is outside [2, %d]", o.nc, MAXNC);   // [ss16-nc4]
+    DCHECK(ndev >= o.nc, "need %d GPUs, have %d (--nc)", o.nc, ndev);
+    // [ss16-nc4] the card-count INFRASTRUCTURE is in: the option, the per-card array extents grown to
+    // MAXNC, and a static_assert at each grown site so a missed or reverted one is a build failure with a
+    // name. What is NOT in is the two things that carry three-card ARITHMETIC: the attention-share
+    // partition (A.ng = i == 0 ? 2 : 3, and NNr[3] = {1696, 1728, 1696} — a three-way split of the wo_b
+    // rows) and the split's exchange (uint4* dst[2] / int js[2] and xpush(..., dst[0], dst[1], ...) — two
+    // named peer queues). Until each is generalised, refuse at start rather than index past them or push to
+    // a queue that was never filled. Each gate lifts with its own commit, identity at N=3 re-proved each time.
+    DCHECK(o.nc == 3, "ss16/nc4: --nc %d needs the attention-share partition and the N-1-peer exchange "
+                  "generalised (not yet); NC = 3 is the shipped shape", o.nc);
+    const int NC = o.nc;
     E->cards.resize(NC);
     const size_t XB = expert_bytes(XF_FP4);
     std::vector<double> lb(NL), lb0(NL);   // lb0: non-expert part only
@@ -3849,7 +3878,7 @@ Engine* create(const Options& opt) {
         const int NNr[3] = {1696, 1728, 1696};
         for (int l = 0; l < NL; l++) {
             Layer& W = E->L[l];
-            int order[3] = {W.card, -1, -1}, q = 1;
+            int order[MAXNC] = {W.card, -1, -1, -1}, q = 1;
             for (int k = 0; k < NC; k++)
                 if (k != W.card) order[q++] = k;
             int g0 = 0, n0 = 0;
@@ -7090,7 +7119,7 @@ static void attn_split(Engine* E, Card& c, const Layer& W, int l, int s, int n, 
         }
         attn_share(E, k, j, W, l, s, n, nsel, kind, j == oi ? W.kvw : A.ring, j == oi ? W.kmask : ARING - 1, tag, stage);
     };
-    int ord[3], no = 0;   // stages 0, 1: owner first; stage 2: the others first (the owner then waits for their X3)
+    int ord[MAXNC], no = 0;   // stages 0, 1: owner first; stage 2: the others first (the owner then waits for their X3)
     ord[no++] = oi;
     for (int j = 0; j < 3; j++)
         if (j != oi) ord[no++] = j;
@@ -7398,7 +7427,7 @@ static bool pfwob_ok(Engine* E, const Layer& W, int n) {
 static void attn_pfsplit(Engine* E, Card& c, const Layer& W, int l, int s, int n, int nsel, int kind, bool pf) {
     const int oi = W.card, SQ = 512;
     const int p0 = std::max(0, s - (WIN - 1));
-    const SrcCache* scs[3] = {};
+    const SrcCache* scs[MAXNC] = {};
     // the unsplit linq's row slices (owner's dequant scratch)
     const int slq = std::max<int>(32, (int)std::min<size_t>(NH * HD, c.deq_elems / QLR) / 32 * 32);
     const int slb = std::max<int>(32, (int)std::min<size_t>(D, c.deq_elems / (OG * OLR)) / 32 * 32);
@@ -7463,7 +7492,7 @@ static void attn_pfsplit(Engine* E, Card& c, const Layer& W, int l, int s, int n
             k.sel_tag = tag;
         }
     }
-    int ord[3] = {-1, -1, oi}, no = 0;   // the other cards first (theirs is the larger share)
+    int ord[MAXNC] = {-1, -1, oi, -1}, no = 0;   // the other cards first (theirs is the larger share)
     for (int j = 0; j < 3; j++)
         if (j != oi) ord[no++] = j;
     for (int jj = 0; jj < 3; jj++) {
@@ -8791,7 +8820,7 @@ static void moe_prefill(Engine* E, Card& c, Layer& W, int l, int n) {
         DCK(cudaSetDevice(c.dev));
     }
     std::vector<int> shadow;   // (pdchk) remote assignment kept for the comparison; the owner computes everything
-    static unsigned* d_badk[3] = {};
+    static unsigned* d_badk[MAXNC] = {};
     unsigned* d_bad = nullptr;
     if (pd && pdchk) {
         shadow = asg;
@@ -8931,7 +8960,7 @@ static void moe_prefill(Engine* E, Card& c, Layer& W, int l, int n) {
     bool sdone = false;
     auto add_s = [&]() {
         sdone = true;
-        int hk[3], nh = 0;
+        int hk[MAXNC], nh = 0;
         for (int k = 0; k < NC; k++)
             if (hsk[k] && rwork[k]) hk[nh++] = k;
         if (!E_hsred_off && !E->hostx && nh == 2) {   // [dsv4-pf15-hsred]
@@ -10927,7 +10956,7 @@ static void cap_step(Engine* E, int s, bool async) {
         }
         DCK(cudaMemcpyAsync(E->h_tok, c.d_tok, 4, cudaMemcpyDeviceToHost, c.st));
     }
-    cudaGraph_t g[3] = {};
+    cudaGraph_t g[MAXNC] = {};
     for (int k = 0; k < NC; k++) {
         Card& c = E->cards[k];
         DevGuard dg(c.dev);

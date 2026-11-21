@@ -109,6 +109,7 @@ int main(int argc, char** argv) {
         else if (a == "--placement-in") o.placement_in = nx();
         else if (a == "--chunk") o.chunk = atoi(nx().c_str());
         else if (a == "--ctx") o.maxctx = atoi(nx().c_str());
+        else if (a == "--nc") o.nc = atoi(nx().c_str());   // [ss16-nc4] card count; 2..MAXNC, default 3
         else if (a == "--cpu-threads") o.cpu_threads = atoi(nx().c_str());
         else if (a == "--reserve-gb") o.reserve_gb = atof(nx().c_str());
         else if (a == "--dyn") o.dyn = atoi(nx().c_str());
