@@ -3317,6 +3317,14 @@ class Job:
                           "completion_tokens": self.n_out(), "finish": self.finish, "slot": self.slot,
                           "prefill_s": self.t1 - self.t0, "decode_s": t2 - self.t1,
                           "queue_s": max(0.0, self.t0 - self.t_enq)}
+            if os.environ.get("DSV4_DSTATS") == "1":  # [ss16-drafter] the T_obs series in the SERVING shape too
+                # app.py never carried this block (the legacy dsv4_app does): the same counter, read after the reply,
+                # so a row-cost cell can be taken through the server the estate actually ships. Off unless asked.
+                # the block lives on the CLib wrapper (dsv4_engine.CLib), which Dsv4Engine holds as `.c`; the
+                # legacy dsv4_app.py holds that wrapper directly, which is why it could print this and app.py could not
+                _cl = getattr(self.gen.engine, "c", None)
+                if _cl is not None and getattr(_cl, "drafter_stats", None) is not None:
+                    self.stats["drafter_block"] = _cl.drafter_block(_cl.drafter_stats())
             if self.lp is not None:
                 self.stats["logprobs"] = self.lp_out  # (entries no text carried: the HTTP side's last chunk)
             if ds is not None:
@@ -3656,6 +3664,13 @@ def log_stats(kind, st):
           f"{' | tool_choice ' + st['tool_choice'] if st.get('tool_choice') else ''}",
           flush=True)
     engine_stats.log(st, st.get("drafts"))  # [stats] lines for benchmark log parsers (QE_STATS_LOG=0: off)
+    if st.get("drafter_block") is not None:  # [ss16-drafter] DSV4_DSTATS=1: the row-cost block, serving shape
+        b = st["drafter_block"]
+        t = b["T_obs_ms"]
+        tstr = " ".join("%d:%.1f(-)" % (n, t[n]) for n in range(6) if t[n] > 0) or "-"
+        cond = " ".join(str(x) for x in b["per_row"]["conditional"] if x is not None) or "-"
+        print("[dsv4] drafter (this box, cumulative since start): passes %s; gate length %s; per-row conditional %s; "
+              "T_obs[n] ms: %s" % (b["passes"], b["gate_rows_per_spec_pass"], cond, tstr), flush=True)
 
 
 # ----------------------------------------------------------------------------- request mapping
