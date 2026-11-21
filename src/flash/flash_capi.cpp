@@ -1962,9 +1962,15 @@ struct FE {
         if (v == pins.end()) return false;
         fprintf(stderr, "[qflash] archive: pinned prefix %zu tokens dropped (%s; %.2f GB, pinned %.2f of %.2f GB)\n",
                 v->toks.size(), why, v->bytes / 1e9, (pin_used - v->bytes) / 1e9, pin_budget / 1e9);
+        // [row4-diag] the archive's own account across a pin drop (issue #40)
+        fprintf(stderr, "[qflash] diag drop_pin BEFORE: aused %.3f of %.3f GB (pool %.3f, pinned %.3f of %.3f GB)\n",
+                aused() / 1e9, eff_budget() / 1e9, hpool.used() / 1e9, pin_used / 1e9, pin_budget / 1e9);
         pin_used -= v->bytes;
         pins.erase(v);
         n_pin_drop++;
+        fprintf(stderr, "[qflash] diag drop_pin AFTER: aused %.3f of %.3f GB (pool %.3f, pinned %.3f of %.3f GB)%s\n",
+                aused() / 1e9, eff_budget() / 1e9, hpool.used() / 1e9, pin_used / 1e9, pin_budget / 1e9,
+                aused() > eff_budget() ? " OVER BUDGET" : "");
         return true;
     }
     Pin* find_pin(const int* ids, int pos, long long sk) {
