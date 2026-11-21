@@ -3166,15 +3166,14 @@ Engine* create(const Options& opt) {
     DCK(cudaGetDeviceCount(&ndev));
     DCHECK(o.nc >= 2 && o.nc <= MAXNC, "--nc: %d is outside [2, %d]", o.nc, MAXNC);   // [ss16-nc4]
     DCHECK(ndev >= o.nc, "need %d GPUs, have %d (--nc)", o.nc, ndev);
-    // [ss16-nc4] The four-card path is gated here, and the gate now names what a MEASURED NC = 4 attempt hits:
-    // a scratch build with this DCHECK lifted boots, plans layers 0..12 / 13..25 / 26..39 / (none) over four cards,
-    // splits the head 4 x 32320 rows, and then aborts at dsv4.cu:2680 -
-    //   DSpark: target layer 37 is not on the last card  -  because the drafter is anchored to cards[NC-1] while
-    //   its target layer 37 lives on card 2 once the split is four-wide.
-    // So the next gate is the DSpark PLACEMENT (put the drafter's head on the card that owns DS_T0, or force DS_T0's
-    // layer onto the last card), not the exchange - the exchange is generalised and identity-proved at N = 3.
-    DCHECK(o.nc == 3, "ss16/nc4: --nc %d needs the DSpark placement generalised (its target layer must sit on the "
-                  "last card today); the exchange and the share partition are done. NC = 3 is the shipped shape", o.nc);
+    // [ss16-nc4] Gated here while the four-card path is proven out. Measured on 2026-11-22: with this check lifted
+    // a four-card boot SUCCEEDS - the N-way split gives 0..10 / 11..21 / 22..33 / 34..39, the head splits 4 x 32320
+    // rows, DSpark loads on card 3 (its target layer 37 is there), and the expert tiers total 3880 slots against
+    // 2576 at three cards (1.51x) - and the FIRST REQUEST then faults in the exchange:
+    //   dsv4.cu:13155 waiting for routing pack: CUDA error unspecified launch failure (card 0)
+    // So the next gate is the N-1-peer exchange DEBUGGED at three peers, not the placement.
+    DCHECK(o.nc == 3, "ss16/nc4: --nc %d: the split, the placement and the tiers work at four cards, but the "
+                  "exchange faults on the first request (unspecified launch failure). NC = 3 is the shipped shape", o.nc);
     const int NC = o.nc;
     E->cards.resize(NC);
     const size_t XB = expert_bytes(XF_FP4);
@@ -3674,60 +3673,83 @@ Engine* create(const Options& opt) {
         std::vector<double> pre(NL + 1, 0);
         for (int l = 0; l < NL; l++) pre[l + 1] = pre[l] + lb[l];
         double best = -1e30;
-        int ba = 1, bb = 2;
+        int bd[MAXNC + 1] = {0}, best_bd[MAXNC + 1] = {0};   // [ss16-nc4] NC - 1 boundaries over NL layers
+        bd[NC] = NL;
         const bool per_layer = pre[NL] - std::accumulate(lb0.begin(), lb0.end(), 0.0) < 1e9;   // must-resident < 1 GB
         // review r8 M1: the attention-split correction of a card holding L layers (owner share 32.7 MB of the 117.4 MB the
         // estimate counts per own layer, 42.3 MB of every other layer, + 124 MB staging and rings)
         auto acorr = [&](int L) { return E->asplit ? 124e6 + 42.3e6 * (NL - L) - (117.4e6 - 32.7e6) * L : 0.0; };
-        auto search = [&] {   // DSpark: its target layers 37..39 must sit on the last card (y <= DS_T0)
+        auto search = [&] {   // [ss16-nc4] N-way: every placement of NC - 1 boundaries, in the same
+            // lexicographic order the two-boundary nested loops used, so NC = 3 keeps the identical split
+            // (ties keep the first). The last boundary must not pass a DSpark target layer (37..39).
             best = -1e30;
-            for (int x = 1; x < NL - 1; x++)
-                for (int y = x + 1; y < (o.dspark ? DS_T0 + 1 : NL); y++) {
-                    const double c0 = cap[0] - acorr(x), c1 = cap[1] - acorr(y - x), c2 = cap[2] - acorr(NL - y);
-                    double m = std::min({c0 - pre[x], c1 - (pre[y] - pre[x]), c2 - (pre[NL] - pre[y])});
-                    if (per_layer)   // no must-resident set (every expert has a host copy): the pools are per layer,
-                        m = std::min({(c0 - pre[x]) / x, (c1 - (pre[y] - pre[x])) / (y - x),   // so balance
-                                      (c2 - (pre[NL] - pre[y])) / (NL - y)});                    // slots per layer (R7-6)
-                    if (m > best) {
-                        best = m;
-                        ba = x;
-                        bb = y;
-                    }
+            for (int k = 1; k < NC; k++) bd[k] = k;   // at least one layer on every earlier card
+            bd[NC] = NL;
+            for (;;) {
+                double m = 1e30;
+                for (int k = 0; k < NC; k++) {
+                    const int L = bd[k + 1] - bd[k];
+                    const double c = cap[k] - acorr(L) - (pre[bd[k + 1]] - pre[bd[k]]);
+                    const double v = per_layer ? c / L : c;
+                    if (v < m) m = v;
                 }
+                if (m > best) {
+                    best = m;
+                    for (int k = 0; k <= NC; k++) best_bd[k] = bd[k];
+                }
+                int k = NC - 1;   // next placement
+                while (k >= 1) {
+                    const int hi = (k == NC - 1) ? (o.dspark ? DS_T0 : NL - 1) : NL - (NC - k);
+                    if (bd[k] < hi) {
+                        bd[k]++;
+                        for (int j = k + 1; j < NC; j++) bd[j] = bd[j - 1] + 1;
+                        break;
+                    }
+                    k--;
+                }
+                if (k < 1) break;
+            }
         };
         search();
         auto take_placement = [&] {   // the earlier run's split too (review M3: same layout across restarts)
             if (o.placement_in.empty()) return;
             Json pj = Json::parse(rd_file(o.placement_in));
             if (pj.has("split")) {
-                ba = (int)pj["split"][0].i();
-                bb = (int)pj["split"][1].i();
-                best = std::min({cap[0] - acorr(ba) - pre[ba], cap[1] - acorr(bb - ba) - (pre[bb] - pre[ba]),
-                                 cap[2] - acorr(NL - bb) - (pre[NL] - pre[bb])});
+                const int ns = (int)pj["split"].arr.size();   // [ss16-nc4] one entry per boundary
+                if (ns >= NC - 1) {
+                    for (int k = 1; k < NC; k++) best_bd[k] = (int)pj["split"][k - 1].i();
+                } else {
+                    logf_("placement file carries %d boundary(ies) for %d cards: ignored\n", ns, NC);
+                }
+                if (ns < NC - 1) return;   // nothing usable in the file: keep the search's split
+                best = 1e30;
+                for (int k = 0; k < NC; k++) {
+                    const int L = best_bd[k + 1] - best_bd[k];
+                    best = std::min(best, cap[k] - acorr(L) - (pre[best_bd[k + 1]] - pre[best_bd[k]]));
+                }
             }
         };
         take_placement();
         double ne_last = 0;
-        for (int l = bb; l < NL; l++) ne_last += lb0[l];
+        for (int l = best_bd[NC - 1]; l < NL; l++) ne_last += lb0[l];   // [ss16-nc4] the last segment
         // review r6 M4 / r7 M5: the drafter leaves the last card less than 1 GB for expert slots beyond its non-expert
         // layers (must-resident experts may degrade to the lane, the drafter may not), or a loaded split puts a DSpark
         // target layer (37..39) off the last card: the model runs, DSpark off
-        if (o.dspark && (cap[NC - 1] - acorr(NL - bb) - ne_last < 1e9 || bb > DS_T0)) {
+        if (o.dspark && (cap[NC - 1] - acorr(NL - best_bd[NC - 1]) - ne_last < 1e9 ||
+                        best_bd[NC - 1] > DS_T0)) {
             logf_("warning: DSpark needs %.2f GB on card %d that is not there (left for experts %.2f GB, split at %d): DSpark off\n",
-                  dspark_bytes(o) / 1e9, NC - 1, (cap[NC - 1] - ne_last) / 1e9, bb);
+                  dspark_bytes(o) / 1e9, NC - 1, (cap[NC - 1] - ne_last) / 1e9, best_bd[NC - 1]);
             E->o.dspark = 0;
             cap[NC - 1] += dspark_bytes(o);
             search();
             take_placement();
         }
-        E->cards[0].l0 = 0;
-        E->cards[0].l1 = E->cards[1].l0 = ba;
-        E->cards[1].l1 = E->cards[2].l0 = bb;
-        E->cards[2].l1 = NL;
-        for (int k = 0; k < NC; k++) {
+        for (int k = 0; k < NC; k++) {   // [ss16-nc4] every card gets its own segment
             Card& c = E->cards[k];
+            c.l0 = best_bd[k];
+            c.l1 = best_bd[k + 1];
             for (int l = c.l0; l < c.l1; l++) E->L[l].card = k;
-            double ld = (k == 0 ? pre[ba] : k == 1 ? pre[bb] - pre[ba] : pre[NL] - pre[bb]);
+            const double ld = pre[c.l1] - pre[c.l0];
             logf_("card %d: layers %d..%d, free %.2f GB, planned non-expert + must-resident %.2f GB, spare %.2f GB\n",
                   k, c.l0, c.l1 - 1, cap[k] / 1e9, ld / 1e9, (cap[k] - ld) / 1e9);
         }
@@ -3735,6 +3757,10 @@ Engine* create(const Options& opt) {
             logf_("WARNING: the pack's resident set does not fit (smallest spare %.2f GB): the lowest-ranked must-resident "
                   "experts get FP4 host copies from the checkpoint\n", best / 1e9);
     }
+        for (int k = 0; k < NC; k++)
+            DCHECK(E->cards[k].l1 > E->cards[k].l0 || NC == 1,
+                   "card %d got no layers (%d..%d): the split found no segment for it",
+                   k, E->cards[k].l0, E->cards[k].l1 - 1);
     ldtl("layer split");   // R24 [dsv4-r24-load] load timeline
     // ---- layer weights
     g_mtag = 3;
