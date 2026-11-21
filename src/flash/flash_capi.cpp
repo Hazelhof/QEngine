@@ -1613,7 +1613,7 @@ struct FE {
             [&](size_t& cost) {
                 Conv* v = copy_victim(keep);
                 const size_t pb = pin_used;
-                if (!v && drop_pin("host memory low")) {  // (pinned prefixes: when no copy is left)
+                if (!v && drop_pin("host memory low", false)) {  // (pinned prefixes: when no copy is left)
                     cost = pb - pin_used;
                 } else if (v) {
                     cost = copy_bytes(*v);
@@ -1784,7 +1784,7 @@ struct FE {
             const size_t p0 = pin_used, n0 = pins.size();
             const size_t got = press_shed(step, [&](size_t& cost) {
                 const size_t pb = pin_used;
-                if (!drop_pin("host memory pressure")) return false;
+                if (!drop_pin("host memory pressure", false)) return false;
                 cost = pb - pin_used;
                 return true;
             });
@@ -1955,7 +1955,12 @@ struct FE {
     }
     // ---- pinned prefixes (FLASH_PREFIX_GB)
     // drop the least recently used pinned prefix (no priority, user decision 2026-11-12); false: none
-    bool drop_pin(const char* why) {
+    // enforce: after the drop, the archive keeps its own budget. A prefix's bytes are freed only when its last holder
+    // lets go, and a conversation restored from this prefix shares its state: the pool can keep them while pin_used
+    // stops counting them, so aused() - the archive's own account - rises over its budget with no eviction, and nothing
+    // checks it again before the next write (issue #40). The reclaim loops that call this from inside their own eviction
+    // callback pass false: they evict for their own cost, and a nested eviction would walk the copies while they do.
+    bool drop_pin(const char* why, bool enforce = true) {
         auto v = pins.end();
         for (auto it = pins.begin(); it != pins.end(); ++it)
             if (&*it != hold_pin && (v == pins.end() || it->used < v->used)) v = it;
@@ -1965,6 +1970,11 @@ struct FE {
         pin_used -= v->bytes;
         pins.erase(v);
         n_pin_drop++;
+        if (enforce && budget && aused() > eff_budget()) {
+            const size_t over = aused() - eff_budget();
+            fprintf(stderr, "[qflash] archive: dropped prefix still held, %.3f GB over the %.2f GB budget: %s\n", over / 1e9,
+                    eff_budget() / 1e9, make_room(0, nullptr) ? "older copies evicted" : "no copy could go");
+        }
         return true;
     }
     Pin* find_pin(const int* ids, int pos, long long sk) {
@@ -2976,6 +2986,18 @@ static void ppb_submit(FE* e, FE::Pf& pf) {
         fprintf(stderr, "[qflash] PP: slot %d prompt rows [%d, %d) in the stage queues: %zu micro-batches of <= %d rows%s, %zu checkpoints\n",
                 pf.slot, pf.i, pf.n, j->cuts.size(), b, busy ? " (others decode)" : "", pf.ckpos.size());
 }
+// checkpoint kind: 7 prompt end, 1 system end (the hint), 2 prompt end - 1, 5 divergence point, 3 periodic.
+// kind 3 needs a periodic position, which needs a period: FLASH_CKPT=0 turns periodic checkpoints off (the plan loop at
+// the start is already gated on ckpt_every > 0), and pos % 0 faults (SIGFPE) on the request that reaches a divergence
+// checkpoint (issue #41). With no period nothing is periodic, so such a position is a divergence point - the same answer
+// the expression gives for any period that does not divide pos.
+static int ck_kind(int pos, int hint, int n, int ckpt_every) {
+    if (pos == n) return 7;
+    if (pos == hint) return 1;
+    if (pos == n - 1) return 2;
+    return (ckpt_every > 0 && pos % ckpt_every == 0) ? 3 : 5;
+}
+
 // the prompt's job is done: its tokens, first token, MTP draft (chain row saved per slot), checkpoints
 static void ppb_finish(FE* e, FE::Pf& pf) {
     PpEngine::SrvJob& j = *pf.job;
@@ -2997,7 +3019,7 @@ static void ppb_finish(FE* e, FE::Pf& pf) {
         st->pos = pos;
         st->pend = false;
         st->prev_m = 0;
-        st->kind = pos == pf.hint ? 1 : pos == pf.n - 1 ? 2 : pos % e->ckpt_every ? 5 : 3;
+        st->kind = ck_kind(pos, pf.hint, pf.n, e->ckpt_every);
         e->add_ck(e->sl[pf.slot].conv, st);
         if (st->kind == 1) e->pin_prefix(pf.slot, pos, st);
     }
@@ -4559,7 +4581,7 @@ int qe_start_begin(void* p, const int* ids, int n, int k, unsigned long long aff
 
 static void take_ck(FE* e, const FE::Pf& pf, int pos) {
     // 7: the prompt end ([qfn-ttft-pe]), 1: system end, 2: prompt end - 1, 5: divergence point, 3: periodic
-    const int kind = pos == pf.n ? 7 : pos == pf.hint ? 1 : pos == pf.n - 1 ? 2 : pos % e->ckpt_every ? 5 : 3;
+    const int kind = ck_kind(pos, pf.hint, pf.n, e->ckpt_every);
     // a conversation keeps one prompt-end state, its latest: the older one goes before the new one is written (with a
     // full archive the write would otherwise evict another conversation for a state that is dropped right after)
     if (kind == 7 && e->sl[pf.slot].conv) kve::drop_kind(*e->sl[pf.slot].conv, 7);
