@@ -10078,10 +10078,10 @@ static void moe_decode(Engine* E, Card& c, Layer& W, int l, int R) {
     if (shs) DCK(cudaStreamWaitEvent(st, c.ev_s1, 0));
     else shared_expert(st);
     if (E->xsplit || E->psplit) {   // R9: the other cards' choice rows into d_yx (their rows here are zero: not in this card's table)
-        int sd[2] = {-1, -1}, ns = 0;
+        int sd[MAXNC - 1] = {-1, -1, -1}, ns = 0;   // [ss16-nc4] one slot per other card
         for (int j = 0; j < (int)E->cards.size(); j++)
             if (j != W.card) sd[ns++] = j;
-        k_ypull<<<R * TOPK, 256, 0, st>>>(c.rx5, c.rx5h, MAXR * TOPK, sd[0], sd[1], xtag + 1, c.d_yx);
+k_ypull<<<R * TOPK, 256, 0, st>>>(c.rx5, c.rx5h, MAXR * TOPK, sd[0], sd[1], sd[2], xtag + 1, c.d_yx);
     }
     if (R <= MAXR) PP(l, 9, st);
     if (early) DCK(cudaStreamWaitEvent(st, c.ev_e1, 0));   // c.x and the side stream's buffers are reused next layer
@@ -13148,7 +13148,7 @@ static void hspin(Engine* E, const volatile int* f, int v, const char* what) {
                 said = true;
                 logf_("WARNING still waiting for %s after 5 s (flag %d, want %d, layer %d)\n", what, *f, v, g_wl);
             }
-            for (int k = 0; k < 3; k++) {   // never recorded: success unless that card's context is broken
+            for (int k = 0; k < (int)E->cards.size(); k++) {   // [ss16-nc4] every card, not the first three
                 if (!E->ev_probe[k]) continue;
                 cudaError_t er = cudaEventQuery(E->ev_probe[k]);
                 DCHECK(er == cudaSuccess || er == cudaErrorNotReady, "waiting for %s: CUDA error %s (card %d)", what,

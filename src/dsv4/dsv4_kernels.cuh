@@ -4649,13 +4649,14 @@ __global__ void k_ypush(const int* ids, const int* slot, const float* y, uint4* 
     }
 }
 // owner: for every choice rk, the senders' headers (rx areas of senders s0, s1; -1 = none), then the present row
-__global__ void k_ypull(const uint4* rows, const uint4* hdr, int stride, int s0, int s1, unsigned tag, float* y) {
+__global__ void k_ypull(const uint4* rows, const uint4* hdr, int stride, int s0, int s1, int s2, unsigned tag, float* y) {   // [ss16-nc4] s2: a third peer
     const int rk = blockIdx.x;
     __shared__ int src;
     if (threadIdx.x == 0) {
         src = -1;
         if (s0 >= 0 && ll_wait(hdr + (size_t)s0 * stride + rk, tag).x) src = s0;
         if (s1 >= 0 && ll_wait(hdr + (size_t)s1 * stride + rk, tag).x) src = s1;
+        if (s2 >= 0 && ll_wait(hdr + (size_t)s2 * stride + rk, tag).x) src = s2;   // [ss16-nc4]
     }
     __syncthreads();
     if (src < 0) return;
