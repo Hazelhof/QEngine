@@ -11897,7 +11897,6 @@ static void moe_draft(Engine* E, Card& c, Layer& W, int R) {
 // gate's chosen length, the pass census and the row cost measured on this box. Opt-in, read-only: it never steers a
 // decode decision, which is the point - the alternative is DSV4_DSSEL, marked not-a-default precisely because it does.
 static const bool g_dstats = getenv("DSV4_DSTATS") != nullptr;
-bool dstats_on() { return g_dstats; }   // [ss16-drafter] the C API asks the engine, so there is one definition of it
 static const bool g_dacc = getenv("DSV4_DACC") != nullptr;
 struct DaccBlk { int s; int d[5]; float c[5]; };
 static std::vector<DaccBlk> g_dacc_b;
@@ -12766,6 +12765,24 @@ static void count_pass(Engine* E, bool lookup, int drafted, int emitted) {
     E->ds_ct[lookup ? 3 : 1] += std::max(drafted, acc);
     E->ds_ct[lookup ? 4 : 2] += acc;
     if (g_dstats) E->ds_kind[lookup ? 1 : (emitted > 1 ? 0 : 2)]++;
+}
+// [ss16-drafter] the two readers the C API forwards to. Counting only: neither returns anything a decode decision
+// reads. The layouts are the published ones - keep them in step with dsv4_capi.cpp's comment and the server's labels.
+void draft_stats(const Engine* E, long long out[5]) {
+    for (int i = 0; i < 5; i++) out[i] = E->ds_ct[i];
+}
+int drafter_stats(const Engine* E, double out[24]) {
+    if (!g_dstats) return 0;
+    for (int i = 0; i < 3; i++) out[i] = (double)E->ds_kind[i];        // 0 DSpark, 1 lookup, 2 plain
+    for (int i = 0; i < 5; i++) out[3 + i] = (double)E->ds_tried[i];   // rows tested (j <= a: verified in order)
+    for (int i = 0; i < 5; i++) out[8 + i] = (double)E->ds_ok[i];      // rows kept
+    out[13] = E->ds_gate;      // chosen draft rows summed over DSpark passes; gate length = [13] / [0]
+    out[14] = E->ds_ms_spec;   // the judge's own two EMAs, ms per token
+    out[15] = E->ds_ms_plain;
+    for (int i = 0; i < 6; i++) out[16 + i] = E->ds_Tobs[i];   // ms per pass verifying n drafts, MEASURED on this box
+    out[22] = E->ds_lam;       // moves only under DSV4_DSSEL; published beside ds_T[] for the comparison
+    out[23] = 0;               // reserved
+    return 1;
 }
 int decode_spec(Engine* E, int t, std::vector<int>& out, StepTimes* tm, int cap) {
     xcone_flush(E, "decode");   // [dsv4-xcall]

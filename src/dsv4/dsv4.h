@@ -268,7 +268,12 @@ void set_fuse(Engine* E, int on);
 void set_lookup(Engine* E, int n);   // R17: prompt lookup beside DSpark (min match; 0 = off)
 void set_dspark(Engine* E, int n, float tau);   // n < 0 / tau < 0: unchanged
 void reset(Engine* E);
-bool dstats_on();   // [ss16-drafter] DSV4_DSTATS=1: the drafter's observation counters are being kept (see TIER 11)
+// [ss16-drafter] the drafter's counters, copied out for the C API. Engine is opaque outside dsv4.cu (this header
+// forward-declares it and server/qe_capi.h's contract is a byte layout, not a struct), so the engine reads its own
+// fields and the C API forwards. draft_stats is TIER 11 (qe_draft_stats); drafter_stats is the DSV4_DSTATS block and
+// answers 0 when that switch is off - the same "0 = statistics off" contract dsv4_stats already gives.
+void draft_stats(const Engine* E, long long out[5]);
+int drafter_stats(const Engine* E, double out[24]);
 // [srv-disconnect] flag (nullptr = none): read before every prefill chunk (another thread may set it); non-zero ->
 // PrefillAborted. The pointer is the caller's per call (the server sets it around one start and clears it after)
 void set_prefill_abort(Engine* E, const int* flag);

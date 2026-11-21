@@ -837,34 +837,19 @@ int dsv4_stats(void* p, double* out7) {
 // line is silently left out - which is how dsv4 ran for as long as it has had a drafter and never reported one.
 void qe_draft_stats(void* p, int slot, long long* out) {
     (void)slot;
-    H* h = (H*)p;
-    for (int i = 0; i < 5; i++) out[i] = h->e->ds_ct[i];
+    draft_stats(((H*)p)->e, out);   // the engine reads its own fields: Engine is opaque to this file
 }
-// [ss16-drafter] DSV4_DSTATS=1: the drafter's observation block, measured on this box. Fixed layout, 24 doubles:
-//   [0..2]   passes by kind: DSpark verify / prompt lookup / plain step (the census DACC cannot report: it forces
-//            dspark_adapt = 0 and no lookup, so every position is a full block)
-//   [3..7]   rows tested at position 0..4     [8..12] rows kept there (per-row conditional acceptance in the
-//            production pass - g_conf is a confidence-bucketed calibration and skips lookup passes, so it has no row axis)
-//   [13]     draft rows the gate chose, summed over DSpark passes (gate length = [13] / [0])
-//   [14]     ds_ms_spec   [15] ds_ms_plain    the judge's own two EMAs: the passes' and the plain steps' ms/token
-//   [16..21] ds_Tobs[0..5]: ms per pass verifying n drafts, EWMA measured here, seeded by its first sample
-//   [22]     ds_lam (tokens/ms; moves only when DSV4_DSSEL runs)   [23] reserved
-// Returns 0 when DSV4_DSTATS is off. Nothing in this block is read by a decode decision: the shipped engine's ds_T[]
-// is the author's published table unless DSV4_DSSEL writes it, and this project does not switch that on to take a
-// measurement - it reads the cost the same way, without steering.
+// [ss16-drafter] DSV4_DSTATS=1: the drafter's observation block, 24 doubles, filled by dsv4.cu's drafter_stats():
+//   [0..2] passes by kind (DSpark verify / prompt lookup / plain step) - the census DSV4_DACC cannot report, since it
+//          forces dspark_adapt = 0 and no lookup, making every position a full block
+//   [3..7] rows tested at position 0..4   [8..12] rows kept there (per-row conditional acceptance on the row axis;
+//          g_conf is bucketed by confidence and skips lookup passes, so it has no row axis)
+//   [13] draft rows the gate chose, summed over DSpark passes (gate length = [13] / [0])
+//   [14] ds_ms_spec   [15] ds_ms_plain - the judge's own passes-vs-plain ms/token
+//   [16..21] ds_Tobs[0..5]: ms per pass verifying n drafts, measured HERE (the shipped ds_T[] keeps its published
+//          constants unless DSV4_DSSEL runs, so an engine that never steers also never learns its own row cost)
+//   [22] ds_lam   [23] reserved. Returns 0 when DSV4_DSTATS is off.
 int dsv4_drafter_stats(void* p, double* out24) {
-    H* h = (H*)p;
-    if (!dstats_on()) return 0;
-    Engine* E = h->e;
-    for (int i = 0; i < 3; i++) out24[i] = (double)E->ds_kind[i];
-    for (int i = 0; i < 5; i++) out24[3 + i] = (double)E->ds_tried[i];
-    for (int i = 0; i < 5; i++) out24[8 + i] = (double)E->ds_ok[i];
-    out24[13] = E->ds_gate;
-    out24[14] = E->ds_ms_spec;
-    out24[15] = E->ds_ms_plain;
-    for (int i = 0; i < 6; i++) out24[16 + i] = E->ds_Tobs[i];
-    out24[22] = E->ds_lam;
-    out24[23] = 0;
-    return 1;
+    return drafter_stats(((H*)p)->e, out24);
 }
 }
