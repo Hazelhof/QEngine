@@ -72,6 +72,11 @@ bool parse(const char* args, Options& o, std::string& err) {
         else if (a == "--profile") o.profile = v;
         else if (a == "--ctx") o.maxctx = atoi(v.c_str());
         else if (a == "--nc") o.nc = atoi(v.c_str());   // [ss16-nc4] card count; 2..MAXNC, default 3
+        // [ss16-nc4] the head-row split, now reachable from the server. The CLI has had it (dsv4_main.cpp:124) and
+        // the C API - the only door the server has - did not, so an arm that wanted the full head on the last card
+        // errored out instead; unreachable rather than merely unset (the same class as --dspark-adapt below).
+        // Default 1: passing nothing changes nothing.
+        else if (a == "--hsplit") o.hsplit = atoi(v.c_str());
         else if (a == "--ctx-static") o.ctx_static = std::max(0, atoi(v.c_str()));   // [dsv4-rel8-ctxdef]
         else if (a == "--kv-pool-mib") o.kv_pool_mib = std::max(0, atoi(v.c_str()));   // [dsv4-rel4-p2]
         else if (a == "--dspark") o.dspark = atoi(v.c_str());
