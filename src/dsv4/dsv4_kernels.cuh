@@ -4607,15 +4607,17 @@ __global__ void __launch_bounds__(1024) k_argmax_put(const float* r, int n0, int
     argmax_slice(r, n0, n1, bv, bi, best, b);
     if (threadIdx.x == 0) ll_store(dst, __float_as_uint(best), (uint32_t)b, 0u, tag);
 }
+// [ss16-nc4] a third peer word: at four cards the graph head split has N - 1 = 3 senders (the same class as xpush3
+// and k_ypull's s2). Two cards and three cards pass nullptr where they have no sender, so their path is unchanged.
 __global__ void __launch_bounds__(1024) k_argmax_comb(const float* r, int n0, int n1, const uint4* src0, const uint4* src1,
-                                                      unsigned tag, int* out) {
+                                                      const uint4* src2, unsigned tag, int* out) {
     __shared__ float bv[1024];
     __shared__ int bi[1024];
     float best;
     int b;
     argmax_slice(r, n0, n1, bv, bi, best, b);
     if (threadIdx.x == 0) {
-        for (const uint4* sp : {src0, src1}) {
+        for (const uint4* sp : {src0, src1, src2}) {
             if (!sp) continue;
             const uint4 w = ll_wait(sp, tag);
             const float v = __uint_as_float(w.x);

@@ -3230,9 +3230,9 @@ Engine* create(const Options& opt) {
                 DCK(cudaMemcpyToSymbol(c_llgate, &one, sizeof one));
             }
         }
-        logf_(all && !p2p_fail ? "attention split over the 3 cards (P2P)\n"
-              : E->hostx ? "no P2P between every pair of cards: attention split over the 3 cards through host memory\n"
-                         : "warning: no P2P between every pair of cards: attention split off\n");
+        if (all && !p2p_fail) logf_("attention split over the %d cards (P2P)\n", NC);
+        else if (E->hostx) logf_("no P2P between every pair of cards: attention split over the %d cards through host memory\n", NC);
+        else logf_("warning: no P2P between every pair of cards: attention split off\n");
     }
     // R9 expert split: needs the P2P stores of the attention split; the cb3 tiers (dynamic cb3 pool, static band) stay
     // on the owner card, so it is off with them
@@ -5480,11 +5480,13 @@ Engine* create(const Options& opt) {
         // review r10 H2: the graph's hand-off and head are LL12 words, allocated only with the attention split (P2P, 3 cards)
         // R17: DSV4_DSGRAPH=1: DSpark keeps the graph for its one-row steps (verify passes stay eager); opt-in: R17-3
         // measured the mix slower (verify passes' lane +12-30 %, unexplained)
+        // [ss16-nc4] 2..4 cards: the head split inside the capture was the last three-card shape (two destinations and
+        // a two-word reduce, both now N - 1). Everything else in the capture already looped over the cards it was given.
         E->graph = getenv("DSV4_NOGRAPH") == nullptr && E->enq_thread && E->eg_nvme &&
                    (!E->dspark || getenv("DSV4_DSGRAPH") != nullptr) && o.dump.empty() &&
-                   E->asplit && E->cards.size() == 3;
+                   E->asplit && E->cards.size() >= 2 && E->cards.size() <= MAXNC;
         if (getenv("DSV4_NOGRAPH") == nullptr && !E->graph)
-            logf_("step graph off (needs the enqueue thread, NVMe Engram rows, the attention split over 3 cards)\n");
+            logf_("step graph off (needs the enqueue thread, NVMe Engram rows, the attention split over 2-4 cards)\n");
         if (E->graph) logf_("decode step as one CUDA graph over the cards (captured one step ahead)\n");
         E->graph_cfg = E->graph;
         DCK(cudaHostAlloc((void**)&E->h_tok, 64, cudaHostAllocPortable));
@@ -11002,8 +11004,13 @@ static void cap_step(Engine* E, int s, bool async) {
         if (E->hsplit) {
             // (R10-9: plain remote logits stores + a flag were not ordered over PCIe: a stale slice now and then; each peer
             // reduces its slice to (max, index) and sends one LL12 word instead)
-            DCHECK(NC == 3, "graph head split needs 3 cards");
-            xpush(c, xseg({{xx, D, D, 0, -1}}), 1, E->cards[0].rxx, E->cards[1].rxx, tag);
+            // [ss16-nc4] N - 1 peers, not 2: the first two destinations and the first two words are exactly the
+            // three-card shape; a third destination adds one store to the same launch (xpush_all) and one word to the
+            // reduce. Two cards send one word and pass null for the rest.
+            DCHECK(NC >= 2 && NC <= MAXNC, "graph head split needs 2..4 cards");
+            uint4* hdst[MAXNC - 1] = {};
+            for (int k = 0; k < last; k++) hdst[k] = E->cards[k].rxx;
+            xpush_all(c, xseg({{xx, D, D, 0, -1}}), 1, hdst, last, tag);
             for (int k = 0; k < last; k++) {
                 Card& pk = E->cards[k];
                 DevGuard dg(pk.dev);
@@ -11016,7 +11023,9 @@ static void cap_step(Engine* E, int s, bool async) {
             const int N = V - E->hr[last];
             if (E->head_qk[last].sq) linq(c, E->head_qk[last], xx, D, 1, c.d_logits + E->hr[last], V);
             else k_gemv_bf16<1><<<cdiv(N, 8), 256, 0, c.st>>>(E->head_k[last], N, D, xx, D, c.d_logits + E->hr[last], V);
-            k_argmax_comb<<<1, 1024, 0, c.st>>>(c.d_logits, E->hr[last], V, c.rxx + 1, c.rxx + 2, tag + 1, c.d_tok);
+            k_argmax_comb<<<1, 1024, 0, c.st>>>(c.d_logits, E->hr[last], V, c.rxx + 1,
+                                                last > 1 ? c.rxx + 2 : nullptr,
+                                                last > 2 ? c.rxx + 3 : nullptr, tag + 1, c.d_tok);
         } else {
             head_gemv(E, xx, 1);
             k_argmax<<<1, 1024, 0, c.st>>>(c.d_logits, V, c.d_tok);
