@@ -41,6 +41,19 @@ This fork exists to answer one narrow question — **what does QEngine do, and w
   **2 576 → 3 880** expert slots (**1.51×**), row cost **−13…−22 %**, decode **+15.7…+20 %** — on a c=1,
   prefix-reused, long-reply shape. It is the last cheap step on this box, and a *shape* result, not a general one:
   a cold-document lane above ~19K prompt tokens would prefer pipelined prefill end-to-end instead.
+- **The four-card decode step runs as one captured CUDA graph, and the served text does not move.** The graph was
+  gated to exactly three cards (`E->graph = … && E->cards.size() == 3`) and the head split *inside* it was two-wide —
+  two peer stores and a two-word reduce — so the gate hid the limitation: the assertion inside that path could never
+  fire at four cards. Generalised to N−1 peers (and the gate opened to 2–4 cards), the graph captures at four cards
+  with the drafter **off and on**, and serves the **same greedy text** as the eager path: the same six-prompt identity
+  set on both arms, a 512-token reply byte-identical, zero CUDA faults across boots. Its rate is **+2.4 %** inside a
+  3.9–5.2 % within-arm spread — a correctness result, not a speed lever. Branch: `ss16/nc4`.
+- **Two engine facts, each reproducible in a minute from the shipped image.** `--hsplit` is parsed by the CLI
+  (`src/dsv4/dsv4_main.cpp`) and **absent from the C API** (`src/dsv4/dsv4_capi.cpp`), so an arm that passes it
+  through the server dies at `dsv4_create: unknown argument --hsplit` — unreachable through the only door the server
+  has, rather than merely unset. And a greedy reply at four cards is a function of its **states**, not of the prompt
+  alone: the drafter on against off, and the per-card expert tier at two different slot counts, each move the served
+  text while everything else is held. A four-card number that does not name those states is not a cell.
 
 ### Branch policy
 
