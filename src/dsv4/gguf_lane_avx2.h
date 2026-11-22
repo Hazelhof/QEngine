@@ -162,6 +162,27 @@ static inline float gg_row_dot(const uint8_t* c, const uint16_t* ds, int nb, con
     for (int b = 0; b < nb; b++, c += CS, a += 256) {
         const float d = gl::h2f(ds[b * DS]);
         const float da0 = d * ascl[2 * b], da1 = d * ascl[2 * b + 1];
+        if constexpr (MF == XF_IQ1S) {
+            // [iq1s] w = dl*(grid_int8 + delta): a SIGNED grid, so the magnitude+sign-mask decode below does not
+            // apply. Integer dot per 32 weights + the delta term, one fp32 multiply per group (the file's own
+            // convention: lo/hi carry the scaled groups).
+            for (int k = 0; k < 8; k++) {
+                uint16_t qh;
+                memcpy(&qh, c + 32 + 2 * k, 2);
+                const float dl = (float)(2 * ((qh >> 12) & 7) + 1);
+                const float delta = (qh & 0x8000) ? -0.125f : 0.125f;
+                for (int l = 0; l < 4; l++) {
+                    const int8_t* g = (const int8_t*)(gg_iq1s_grid + (c[4 * k + l] | (((qh >> (3 * l)) & 7) << 8)));
+                    const int8_t* av = a + 32 * k + 8 * l;
+                    int dot = 0, sum = 0;
+                    for (int j = 0; j < 8; j++) { dot += (int)g[j] * (int)av[j]; sum += (int)av[j]; }
+                    const float da = (32 * k + 8 * l) < 128 ? da0 : da1;
+                    // lane 0 only: the tail reduces 16 lanes, so a set1 would count the group 8 times
+                    lo = _mm256_add_ps(lo, _mm256_setr_ps(da * dl * ((float)dot + delta * (float)sum), 0, 0, 0, 0, 0, 0, 0));
+                }
+            }
+            continue;
+        }
         __m256i g[8], m[8], dv[8];
         gl::blk_decode<MF>(c, g, m);
         gl::blk_dots(g, m, a, dv);
@@ -385,6 +406,7 @@ static inline void k_ggv_any(int mf, const uint8_t* q, const uint16_t* s, int K,
             case XF_IQ2XXS: y[r] = gg_row_dot<XF_IQ2XXS>(c, d, nb, a, ascl); break;
             case XF_IQ3XXS: y[r] = gg_row_dot<XF_IQ3XXS>(c, d, nb, a, ascl); break;
             case XF_IQ2S: y[r] = gg_row_dot<XF_IQ2S>(c, d, nb, a, ascl); break;
+            case XF_IQ1S: y[r] = gg_row_dot<XF_IQ1S>(c, d, nb, a, ascl); break;
             default: y[r] = gg_row_dot<XF_IQ3S>(c, d, nb, a, ascl); break;
         }
     }
@@ -443,6 +465,7 @@ static inline void k_ggv_nat(int mf, const uint8_t* raw, int K, int r0, int r1, 
             case XF_IQ2XXS: y[r] = gg_row_dot<XF_IQ2XXS, true>(row + 2, d, nb, a, ascl); break;
             case XF_IQ3XXS: y[r] = gg_row_dot<XF_IQ3XXS, true>(row + 2, d, nb, a, ascl); break;
             case XF_IQ2S: y[r] = gg_row_dot<XF_IQ2S, true>(row + 2, d, nb, a, ascl); break;
+            case XF_IQ1S: y[r] = gg_row_dot<XF_IQ1S, true>(row + 2, d, nb, a, ascl); break;
             default: y[r] = gg_row_dot<XF_IQ3S, true>(row + 2, d, nb, a, ascl); break;
         }
     }

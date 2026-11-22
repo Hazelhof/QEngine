@@ -40,14 +40,19 @@ static void gg_setup(Engine* E, const std::string& dir) {
             const GgTensor* t = E->gg->m.expert_tensor(l, m);
             DCHECK(t, "--gguf-experts: layer %d matrix %d missing in %s", l, m, dir.c_str());
             mf[m] = gg_mat_fmt(t->type);
-            DCHECK(mf[m] != (XFmt)255, "--gguf-experts: %s is %s (supported: IQ2_XXS, IQ3_XXS, IQ2_S, IQ3_S)", t->name.c_str(),
+            DCHECK(mf[m] != (XFmt)255, "--gguf-experts: %s is %s (supported: IQ2_XXS, IQ3_XXS, IQ2_S, IQ3_S, IQ1_S)", t->name.c_str(),
                    gg_type_name(t->type));
             const uint64_t K = m < 2 ? D : INTER, N = m < 2 ? INTER : D;
             DCHECK(t->sized && t->ne.size() == 3 && t->ne[0] == K && t->ne[1] == N && t->ne[2] == NE, "--gguf-experts: %s dims", t->name.c_str());
         }
         DCHECK(mf[0] == mf[1], "--gguf-experts: layer %d gate %d / up %d formats differ (the decode GEMV takes one)", l,
                (int)mf[0], (int)mf[1]);
-        E->gg->fmt[l] = gg_expert_fmt(mf[0], mf[1], mf[2]);
+        // [iq1s] the flag form is expert-wide: all three matrices or none
+        if (mf[0] == XF_IQ1S || mf[1] == XF_IQ1S || mf[2] == XF_IQ1S)
+            DCHECK(mf[0] == XF_IQ1S && mf[1] == XF_IQ1S && mf[2] == XF_IQ1S,
+                   "--gguf-experts: layer %d mixes IQ1_S with another expert format (%d/%d/%d); this build encodes "
+                   "IQ1_S only as an expert-wide format", l, (int)mf[0], (int)mf[1], (int)mf[2]);
+        E->gg->fmt[l] = mf[0] == XF_IQ1S ? gg_expert_fmt1() : gg_expert_fmt(mf[0], mf[1], mf[2]);
         nfmt[E->gg->fmt[l]]++;
         for (int e = 0; e < NE; e++) {
             DCHECK(E->L[l].hfmt[e] >= 0, "--gguf-experts needs a pack with a host format for every expert (M23 pack); layer %d expert %d has none", l, e);
@@ -72,6 +77,7 @@ static void gg_card_init(Engine* E, Card& c) {
     memcpy(hg.data() + GG_OFF_IQ3XXS, gg_iq3xxs_grid, 1024);
     memcpy(hg.data() + GG_OFF_IQ2S, gg_iq2s_grid, 8192);
     memcpy(hg.data() + GG_OFF_IQ3S, gg_iq3s_grid, 2048);
+    memcpy(hg.data() + GG_OFF_IQ1S, gg_iq1s_grid, 16384);   // [iq1s] 2048 entries x 8 signed int8
     c.d_gg = (uint8_t*)dmalloc(GG_GRID_BYTES);
     DCK(cudaMemcpy(c.d_gg, hg.data(), GG_GRID_BYTES, cudaMemcpyHostToDevice));
 }

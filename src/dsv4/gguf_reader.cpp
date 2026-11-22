@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdlib>
+#include <cstdio>
 #include <set>
 
 #include "gguf_iq.h"
@@ -214,14 +216,24 @@ bool GgufModel::open_dir(const std::string& dir, std::string* err) {
             return false;
         }
     std::set<int> nos;
+    int mix_logged = 0;
+    // [iq1s] DSV4_GG_ALLOW_SPLIT_MIX=1: a published pack may ship its halves as two complementary split sets
+    // (Maya-XS: the model as a later 3-shard re-cut, the Engram as shards 4-5 of the original 5; the numbers live in
+    // the GGUF headers, so no rename reconciles them). Unset, the guard below reads exactly as before.
+    static const bool allow_mix = getenv("DSV4_GG_ALLOW_SPLIT_MIX") && atoi(getenv("DSV4_GG_ALLOW_SPLIT_MIX")) != 0;
     for (auto& n : names) {
         if (!add_file(dir + "/" + n, err)) return false;
         const GgFile& F = f_.back();
-        if (F.split_count != f_[0].split_count || F.split_no >= F.split_count || !nos.insert(F.split_no).second) {
+        const bool same_set = F.split_count == f_[0].split_count;
+        if (F.split_no >= F.split_count || !nos.insert((size_t)F.split_count * 4096 + F.split_no).second ||
+            (!same_set && !allow_mix)) {
             if (err) *err = F.path + ": split.no " + std::to_string(F.split_no) + " / split.count " + std::to_string(F.split_count) +
                             " does not fit the set of " + f_[0].path;
             return false;
         }
+        if (!same_set && allow_mix && mix_logged++ == 0)
+            fprintf(stderr, "[gguf] DSV4_GG_ALLOW_SPLIT_MIX=1: mixing split sets — %s (%d shards) with %s (%d shards); "
+                            "the tensor census is the check\n", f_[0].path.c_str(), f_[0].split_count, F.path.c_str(), F.split_count);
     }
     return true;
 }
@@ -253,13 +265,39 @@ bool GgufModel::kv(const std::string& key, std::string* v) const {
     const GgFile* f = first_file(f_);
     if (!f) return false;
     auto it = f->kv.find(key);
-    if (it == f->kv.end()) return false;
-    *v = it->second;
+    if (it != f->kv.end()) { *v = it->second; return true; }
+    // [iq1s] a pack whose halves are two split sets keeps some metadata with the other half: fall back to the file
+    // that carries the key, and refuse to choose when two of them disagree.
+    const std::string* got = nullptr;
+    for (auto& x : f_) {
+        auto j = x.kv.find(key);
+        if (j == x.kv.end()) continue;
+        if (got && *got != j->second) {
+            fprintf(stderr, "[gguf] metadata %s disagrees between %s and another file\n", key.c_str(), f->path.c_str());
+            return false;
+        }
+        if (!got) {
+            fprintf(stderr, "[gguf] metadata %s comes from %s (the first shard does not carry it)\n", key.c_str(),
+                    x.path.c_str());
+            got = &j->second;
+        }
+    }
+    if (!got) return false;
+    *v = *got;
     return true;
 }
 template <class T>
 static bool arr_get(const std::vector<GgFile>& fs, const std::string& key, std::vector<T>* v) {
     const GgFile* f = first_file(fs);
+    // [iq1s] a two-set pack keeps some arrays with the other half: fall back to the file that carries the key
+    if (!f || f->arr.find(key) == f->arr.end())
+        for (auto& x : fs)
+            if (x.arr.find(key) != x.arr.end()) {
+                if (f) fprintf(stderr, "[gguf] metadata array %s comes from %s (the first shard does not carry it)\n",
+                               key.c_str(), x.path.c_str());
+                f = &x;
+                break;
+            }
     if (!f) return false;
     auto it = f->arr.find(key);
     if (it == f->arr.end()) return false;

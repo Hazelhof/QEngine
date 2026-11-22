@@ -78,6 +78,27 @@ template <> struct Blk<XF_IQ3XXS> {
         s = sm[k]; el = eh = e[k];
     }
 };
+// [iq1s] prefill block: weights computed as dl*(grid + delta), handed over as fp32 (mat() rounds them to bf16 as
+// it does for every format); no sign mask, scale 1.
+template <> struct Blk<XF_IQ1S> {
+    static constexpr int CB = 48;
+    const uint8_t* c;
+    float d;
+    inline void prep(const uint8_t* cc, float dd) { c = cc; d = dd; }
+    inline void w(int k, __m256* w4, uint32_t& s, float& el, float& eh) const {
+        uint16_t qh;
+        memcpy(&qh, c + 32 + 2 * k, 2);
+        const float dl = d * (float)(2 * ((qh >> 12) & 7) + 1);
+        const float delta = (qh & 0x8000) ? -0.125f : 0.125f;
+        alignas(32) float f[32];
+        for (int l = 0; l < 4; l++) {
+            const int8_t* g = (const int8_t*)(gg_iq1s_grid + (c[4 * k + l] | (((qh >> (3 * l)) & 7) << 8)));
+            for (int j = 0; j < 8; j++) f[8 * l + j] = dl * ((float)g[j] + delta);
+        }
+        for (int i = 0; i < 4; i++) w4[i] = _mm256_load_ps(f + 8 * i);
+        s = 0; el = eh = 1.f;
+    }
+};
 template <> struct Blk<XF_IQ2S> {
     static constexpr int CB = 80;
     float e[8][2];
@@ -203,6 +224,7 @@ static inline void mat_run(int mf, int m, const uint8_t* q, const void* s, int N
     if (mf == XF_IQ2XXS) mat_any<XF_IQ2XXS>(m, q, ds, N, K, x, y, ldy);
     else if (mf == XF_IQ3XXS) mat_any<XF_IQ3XXS>(m, q, ds, N, K, x, y, ldy);
     else if (mf == XF_IQ2S) mat_any<XF_IQ2S>(m, q, ds, N, K, x, y, ldy);
+    else if (mf == XF_IQ1S) mat_any<XF_IQ1S>(m, q, ds, N, K, x, y, ldy);
     else mat_any<XF_IQ3S>(m, q, ds, N, K, x, y, ldy);
 }
 // GPU-equal helpers (as gguf_pfcpu.h)

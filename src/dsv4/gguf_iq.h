@@ -28,7 +28,7 @@ namespace dsv4 {
 // ggml type ids (gguf file format)
 enum GgType : uint32_t {
     GG_F32 = 0, GG_F16 = 1, GG_Q8_0 = 8, GG_Q6_K = 14, GG_IQ2_XXS = 16, GG_IQ2_XS = 17, GG_IQ3_XXS = 18,
-    GG_IQ3_S = 21, GG_IQ2_S = 22, GG_BF16 = 30
+    GG_IQ1_S = 19, GG_IQ3_S = 21, GG_IQ2_S = 22, GG_BF16 = 30
 };
 inline const char* gg_type_name(uint32_t t) {
     switch (t) {
@@ -74,10 +74,12 @@ inline void gg_type_block(uint32_t t, int& bw, int& bb) {
 
 // matrix format (XFmt 4..7, dsv4.h) <-> ggml type
 inline XFmt gg_mat_fmt(uint32_t t) {
-    return t == GG_IQ2_XXS ? XF_IQ2XXS : t == GG_IQ3_XXS ? XF_IQ3XXS : t == GG_IQ2_S ? XF_IQ2S : t == GG_IQ3_S ? XF_IQ3S : (XFmt)255;
+    return t == GG_IQ2_XXS ? XF_IQ2XXS : t == GG_IQ3_XXS ? XF_IQ3XXS : t == GG_IQ2_S ? XF_IQ2S
+           : t == GG_IQ3_S ? XF_IQ3S : t == GG_IQ1_S ? XF_IQ1S : (XFmt)255;
 }
 inline uint32_t gg_type_of(XFmt mf) {
-    return mf == XF_IQ2XXS ? GG_IQ2_XXS : mf == XF_IQ3XXS ? GG_IQ3_XXS : mf == XF_IQ2S ? GG_IQ2_S : GG_IQ3_S;
+    return mf == XF_IQ2XXS ? GG_IQ2_XXS : mf == XF_IQ3XXS ? GG_IQ3_XXS : mf == XF_IQ2S ? GG_IQ2_S
+           : mf == XF_IQ1S ? GG_IQ1_S : GG_IQ3_S;
 }
 
 // ---------------------------------------------------------------- scalar dequant (reference; host and device)
@@ -143,6 +145,19 @@ inline void gg_deq_block(XFmt mf, const uint8_t* c, float d, float* y) {
                 const float db = l < 2 ? db0 : db1;
                 for (int j = 0; j < 8; j++)
                     y[32 * k + 8 * l + j] = db * (float)((g >> (8 * j)) & 255) * ((s >> j) & 1 ? -1.f : 1.f);
+            }
+        }
+    } else if (mf == XF_IQ1S) {   // [iq1s] d * (2*sc+1) * (grid + +-0.125); llama.cpp ggml-quants.c dequantize_row_iq1_s
+        const uint8_t* qs = c;
+        const uint8_t* qhb = c + 32;
+        for (int k = 0; k < 8; k++) {
+            uint16_t qh;
+            memcpy(&qh, qhb + 2 * k, 2);
+            const float dl = d * (float)(2 * ((qh >> 12) & 7) + 1);
+            const float delta = (qh & 0x8000) ? -0.125f : 0.125f;
+            for (int l = 0; l < 4; l++) {
+                const int8_t* g = (const int8_t*)(gg_iq1s_grid + (qs[4 * k + l] | (((qh >> (3 * l)) & 7) << 8)));
+                for (int j = 0; j < 8; j++) y[32 * k + 8 * l + j] = dl * ((float)g[j] + delta);
             }
         }
     } else {   // XF_IQ3S

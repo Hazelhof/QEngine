@@ -223,6 +223,27 @@ static inline float gg_row_dot(const uint8_t* c, const uint16_t* ds, int nb, con
                                                        (float)(2 * (s1 & 15) + 1) * da, (float)(2 * (s1 >> 4) + 1) * da)));
                 acc = _mm512_fmadd_ps(_mm512_cvtepi32_ps(dt), fv, acc);
             }
+        } else if constexpr (MF == XF_IQ1S) {
+            // [iq1s] w = dl * (grid_int8 + delta): the grid is SIGNED here, so the magnitude+sign-mask pattern of
+            // the four original formats does not apply. Per 32 weights the dot is integer (grid x int8 act) and the
+            // delta term is dl*delta*sum(act); one fp32 multiply per group, the same convention as the others.
+            const uint8_t* qs = c;
+            for (int k = 0; k < 8; k++) {
+                uint16_t qh;
+                memcpy(&qh, c + 32 + 2 * k, 2);
+                const float dl = (float)(2 * ((qh >> 12) & 7) + 1);
+                const float delta = (qh & 0x8000) ? -0.125f : 0.125f;
+                for (int l = 0; l < 4; l++) {
+                    const int8_t* g = (const int8_t*)(gg_iq1s_grid + (qs[4 * k + l] | (((qh >> (3 * l)) & 7) << 8)));
+                    const int8_t* av = a + 32 * k + 8 * l;
+                    int dot = 0, sum = 0;
+                    for (int j = 0; j < 8; j++) { dot += (int)g[j] * (int)av[j]; sum += (int)av[j]; }
+                    const float da = (32 * k + 8 * l) < 128 ? da0 : da1;
+                    // lane 0 only: _mm512_reduce_add_ps sums 16 lanes, so a set1 would count the group 16 times
+                    acc = _mm512_add_ps(acc, _mm512_setr_ps(da * dl * ((float)dot + delta * (float)sum), 0, 0, 0, 0, 0, 0, 0,
+                                                            0, 0, 0, 0, 0, 0, 0, 0));
+                }
+            }
         } else {   // XF_IQ3S: 9-bit indices qs[i] | ((qh[i / 8] >> (i % 8)) & 1) << 8, i = 0..63
             memcpy(sm, c + 72, 32);
             const uint8_t* sc = c + 104;
@@ -483,6 +504,7 @@ static inline void k_ggv_any(int mf, const uint8_t* q, const uint16_t* s, int K,
             case XF_IQ2XXS: y[r] = gg_row_dot<XF_IQ2XXS>(c, d, nb, a, ascl); break;
             case XF_IQ3XXS: y[r] = gg_row_dot<XF_IQ3XXS>(c, d, nb, a, ascl); break;
             case XF_IQ2S: y[r] = gg_row_dot<XF_IQ2S>(c, d, nb, a, ascl); break;
+            case XF_IQ1S: y[r] = gg_row_dot<XF_IQ1S>(c, d, nb, a, ascl); break;
             default: y[r] = gg_row_dot<XF_IQ3S>(c, d, nb, a, ascl); break;
         }
     }
@@ -553,6 +575,7 @@ static inline void k_ggv_nat(int mf, const uint8_t* raw, int K, int r0, int r1, 
             case XF_IQ2XXS: y[r] = gg_row_dot<XF_IQ2XXS, true>(row + 2, d, nb, a, ascl); break;
             case XF_IQ3XXS: y[r] = gg_row_dot<XF_IQ3XXS, true>(row + 2, d, nb, a, ascl); break;
             case XF_IQ2S: y[r] = gg_row_dot<XF_IQ2S, true>(row + 2, d, nb, a, ascl); break;
+            case XF_IQ1S: y[r] = gg_row_dot<XF_IQ1S, true>(row + 2, d, nb, a, ascl); break;
             default: y[r] = gg_row_dot<XF_IQ3S, true>(row + 2, d, nb, a, ascl); break;
         }
     }

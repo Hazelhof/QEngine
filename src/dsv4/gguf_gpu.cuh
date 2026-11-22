@@ -17,15 +17,24 @@
 namespace dsv4 {
 
 // device copy of the four grids, back to back (gg_grids_upload): byte offsets
-constexpr int GG_OFF_IQ2XXS = 0, GG_OFF_IQ3XXS = 2048, GG_OFF_IQ2S = 3072, GG_OFF_IQ3S = 11264, GG_GRID_BYTES = 13312;
+constexpr int GG_OFF_IQ2XXS = 0, GG_OFF_IQ3XXS = 2048, GG_OFF_IQ2S = 3072, GG_OFF_IQ3S = 11264,
+              GG_OFF_IQ1S = 13312,   // [iq1s] 2048 entries x 8 signed int8 = 16384 B
+              GG_GRID_BYTES = 29696;
 __host__ __device__ constexpr int gg_grid_off(int mf) {
-    return mf == XF_IQ2XXS ? GG_OFF_IQ2XXS : mf == XF_IQ3XXS ? GG_OFF_IQ3XXS : mf == XF_IQ2S ? GG_OFF_IQ2S : GG_OFF_IQ3S;
+    return mf == XF_IQ2XXS ? GG_OFF_IQ2XXS : mf == XF_IQ3XXS ? GG_OFF_IQ3XXS : mf == XF_IQ2S ? GG_OFF_IQ2S
+           : mf == XF_IQ1S ? GG_OFF_IQ1S : GG_OFF_IQ3S;
 }
 __host__ __device__ constexpr int gg_grid_bytes(int mf) {
-    return mf == XF_IQ2XXS ? 2048 : mf == XF_IQ3XXS ? 1024 : mf == XF_IQ2S ? 8192 : 2048;
+    return mf == XF_IQ2XXS ? 2048 : mf == XF_IQ3XXS ? 1024 : mf == XF_IQ2S ? 8192 : mf == XF_IQ1S ? 16384 : 2048;
 }
 
 __device__ __forceinline__ uint32_t gg_sign8(uint32_t v7) { return v7 | ((__popc(v7) & 1) << 7); }
+// [iq1s] one byte of a signed grid word as a signed value (the grid holds -1/0/+1)
+__device__ __forceinline__ float gg_s8f(uint32_t w, int q) {
+    const float u = (float)((w >> (8 * q)) & 255);   // self-contained: no dependence on gg_u8f being declared first
+    return u >= 128.f ? u - 256.f : u;
+}
+
 __device__ __forceinline__ float gg_sgn(float v, uint32_t s, int j) { return (s >> j) & 1 ? -v : v; }
 // R20 [dsv4-r20-u8f]: byte q of w as an exact float without I2F (a quarter-rate pipe on sm_86): the byte placed in
 // the mantissa of 2^23 (byte_perm with 0x4B000000), minus 2^23. Same value as (float)((w >> 8q) & 255)
@@ -77,6 +86,18 @@ __device__ __forceinline__ void gg_sub(const uint8_t* c, int k, const void* grid
             for (int j = 0; j < 8; j++)
                 w[8 * l + j] = gg_sgn(db * gg_u8f(j < 4 ? g.x : g.y, j & 3), s, j);
         }
+    } else if constexpr (MF == XF_IQ1S) {
+        uint16_t qh;
+        memcpy(&qh, c + 32 + 2 * k, 2);
+        const float dl = (float)(2 * ((qh >> 12) & 7) + 1);
+        const float delta = (qh & 0x8000) ? -0.125f : 0.125f;
+        const uint2* G = (const uint2*)grid;
+#pragma unroll
+        for (int l = 0; l < 4; l++) {
+            const uint2 g = G[c[4 * k + l] | (((qh >> (3 * l)) & 7) << 8)];
+#pragma unroll
+            for (int j = 0; j < 8; j++) w[8 * l + j] = dl * (gg_s8f(j < 4 ? g.x : g.y, j & 3) + delta);
+        }
     } else {   // XF_IQ3S
         const uint32_t q0 = *(const uint32_t*)(c + 8 * k), q1 = *(const uint32_t*)(c + 8 * k + 4);
         const uint32_t qh = c[64 + k], sg = *(const uint32_t*)(c + 72 + 4 * k);
@@ -94,9 +115,8 @@ __device__ __forceinline__ void gg_sub(const uint8_t* c, int k, const void* grid
 
 template <int MF>
 __device__ __forceinline__ void gg_load_grid(const uint8_t* grids, uint32_t* sg) {
-    constexpr int NB = MF == XF_IQ2XXS ? 2048 : MF == XF_IQ3XXS ? 1024 : MF == XF_IQ2S ? 8192 : 2048;
-    const uint32_t* g = (const uint32_t*)(grids + (MF == XF_IQ2XXS ? GG_OFF_IQ2XXS : MF == XF_IQ3XXS ? GG_OFF_IQ3XXS
-                                                   : MF == XF_IQ2S ? GG_OFF_IQ2S : GG_OFF_IQ3S));
+    constexpr int NB = gg_grid_bytes(MF);
+    const uint32_t* g = (const uint32_t*)(grids + gg_grid_off(MF));
     for (int i = threadIdx.x; i < NB / 4; i += blockDim.x) sg[i] = g[i];
     __syncthreads();
 }
@@ -121,6 +141,10 @@ struct GgRaw {   // the bytes lane i needs from one block (and the block's d)
         } else if constexpr (MF == XF_IQ2S) {
             const int k = i >> 2;
             a = (uint32_t)c[i] | ((uint32_t)c[32 + i] << 8) | ((uint32_t)c[64 + k] << 16) | ((uint32_t)c[72 + k] << 24);
+        } else if constexpr (MF == XF_IQ1S) {
+            const int k = i >> 2;
+            a = (uint32_t)c[4 * k + (i & 3)];          // the group's qs byte
+            b = (uint32_t)*(const uint16_t*)(c + 32 + 2 * k);   // the sub-block's qh word
         } else {
             const int k = i >> 2;
             a = (uint32_t)*(const uint16_t*)(c + 2 * i) | ((uint32_t)c[64 + k] << 16) | ((uint32_t)c[72 + i] << 24);
@@ -149,6 +173,14 @@ struct GgRaw {   // the bytes lane i needs from one block (and the block's d)
             const uint2 g = ((const uint2*)grid)[(a & 255) | (((qh >> (2 * l)) & 3) << 8)];
 #pragma unroll
             for (int j = 0; j < 8; j++) w[j] = gg_sgn(db * gg_u8f(j < 4 ? g.x : g.y, j & 3), s, j);
+        } else if constexpr (MF == XF_IQ1S) {
+            const int l = i & 3;
+            const uint32_t qh = b;
+            const float dl = (float)(2 * ((qh >> 12) & 7) + 1) * d;
+            const float delta = (qh & 0x8000) ? -0.125f : 0.125f;
+            const uint2 g = ((const uint2*)grid)[(a & 255) | (((qh >> (3 * l)) & 7) << 8)];
+#pragma unroll
+            for (int j = 0; j < 8; j++) w[j] = dl * (gg_s8f(j < 4 ? g.x : g.y, j & 3) + delta);
         } else {
             const int k = i >> 2, e = 2 * (i & 3);
             const uint32_t qh = (a >> 16) & 255, s = a >> 24;
@@ -329,6 +361,7 @@ inline void gg_moe_launch_nm(int which, int mf, const float* x, const int* ids, 
         case XF_IQ2XXS: k_moe_ggm<XF_IQ2XXS, RPW, U, NM><<<g, 256, 0, st>>>(x, which, ids, dslot, pool, s0, xbytes, xf, grids, out, R); break;
         case XF_IQ3XXS: k_moe_ggm<XF_IQ3XXS, RPW, U, NM><<<g, 256, 0, st>>>(x, which, ids, dslot, pool, s0, xbytes, xf, grids, out, R); break;
         case XF_IQ2S: k_moe_ggm<XF_IQ2S, RPW, U, NM><<<g, 256, 0, st>>>(x, which, ids, dslot, pool, s0, xbytes, xf, grids, out, R); break;
+        case XF_IQ1S: k_moe_ggm<XF_IQ1S, RPW, U, NM><<<g, 256, 0, st>>>(x, which, ids, dslot, pool, s0, xbytes, xf, grids, out, R); break;
         default: k_moe_ggm<XF_IQ3S, RPW, U, NM><<<g, 256, 0, st>>>(x, which, ids, dslot, pool, s0, xbytes, xf, grids, out, R); break;
     }
 }
@@ -343,6 +376,7 @@ inline void gg_moe_launch(int which, int mf, const float* x, const int* ids, con
             case XF_IQ2XXS: k_moe_gg<XF_IQ2XXS, RPW, U><<<g, 256, 0, st>>>(x, which, ids, dslot, pool, s0, xbytes, xf, grids, out); break;
             case XF_IQ3XXS: k_moe_gg<XF_IQ3XXS, RPW, U><<<g, 256, 0, st>>>(x, which, ids, dslot, pool, s0, xbytes, xf, grids, out); break;
             case XF_IQ2S: k_moe_gg<XF_IQ2S, RPW, U><<<g, 256, 0, st>>>(x, which, ids, dslot, pool, s0, xbytes, xf, grids, out); break;
+            case XF_IQ1S: k_moe_gg<XF_IQ1S, RPW, U><<<g, 256, 0, st>>>(x, which, ids, dslot, pool, s0, xbytes, xf, grids, out); break;
             default: k_moe_gg<XF_IQ3S, RPW, U><<<g, 256, 0, st>>>(x, which, ids, dslot, pool, s0, xbytes, xf, grids, out); break;
         }
         return;
@@ -435,6 +469,28 @@ __device__ __forceinline__ float gg_sub_dot(const uint32_t a, const uint32_t b, 
             (l < 2 ? s0 : s1) += gg_dot8(w, xw[2 * l], xw[2 * l + 1]);
         }
         return 0.25f * d * ((0.5f + (float)(sc & 15)) * (float)s0 + (0.5f + (float)(sc >> 4)) * (float)s1);
+    } else if constexpr (MF == XF_IQ1S) {
+        const uint2* G = (const uint2*)grid;
+        const uint32_t qh = c & 0xffff;
+        const float dl = (float)(2 * ((qh >> 12) & 7) + 1);
+        const float delta = (qh & 0x8000) ? -0.125f : 0.125f;
+        int s = 0, sums = 0;
+#pragma unroll
+        for (int l = 0; l < 4; l++) {
+            const uint2 g = G[((a >> (8 * l)) & 255) | (((qh >> (3 * l)) & 7) << 8)];
+            uint32_t mx = 0, my = 0, sg = 0;
+#pragma unroll
+            for (int j = 0; j < 8; j++) {
+                const float v = gg_s8f(j < 4 ? g.x : g.y, j & 3);
+                const uint32_t m = (uint32_t)(v < 0.f ? -v : v);
+                if (j < 4) mx |= m << (8 * j); else my |= m << (8 * (j - 4));
+                if (v < 0.f) sg |= 1u << j;
+                const int32_t raw = (j < 4 ? xw[2 * l] : xw[2 * l + 1]);
+                sums += (int)(int8_t)((raw >> (8 * (j & 3))) & 0xff);
+            }
+            s += gg_dot8(GgI8{mx, my, sg}, xw[2 * l], xw[2 * l + 1]);
+        }
+        return d * dl * ((float)s + delta * (float)sums);
     } else {
         const uint32_t* G = (const uint32_t*)grid;
         int s = 0;
@@ -501,6 +557,9 @@ __global__ void __launch_bounds__(256) k_moe_gq2(const int8_t* xq, const float* 
                         ra[u][j] = *(const uint32_t*)(c + 4 * kk);
                         rb[u][j] = *(const uint32_t*)(c + 32 + 4 * kk);
                         rc[u][j] = (uint32_t)c[64 + kk] | ((uint32_t)c[72 + kk] << 8);
+                    } else if constexpr (MF == XF_IQ1S) {
+                        ra[u][j] = *(const uint32_t*)(c + 4 * kk);   // the group's 4 qs bytes
+                        rc[u][j] = (uint32_t)*(const uint16_t*)(c + 32 + 2 * kk);   // its qh word
                     } else {
                         ra[u][j] = *(const uint32_t*)(c + 8 * kk);   // 108-byte blocks: 4-byte aligned only
                         rb[u][j] = *(const uint32_t*)(c + 8 * kk + 4);
@@ -547,6 +606,7 @@ inline void gg_moe_launch_q2(int which, int mf, const int8_t* xq, const float* x
         case XF_IQ2XXS: k_moe_gq2<XF_IQ2XXS, RPW, U><<<g, 256, 0, st>>>(xq, xs, which, ids, dslot, pool, s0, xbytes, xf, grids, out); break;
         case XF_IQ3XXS: k_moe_gq2<XF_IQ3XXS, RPW, U><<<g, 256, 0, st>>>(xq, xs, which, ids, dslot, pool, s0, xbytes, xf, grids, out); break;
         case XF_IQ2S: k_moe_gq2<XF_IQ2S, RPW, U><<<g, 256, 0, st>>>(xq, xs, which, ids, dslot, pool, s0, xbytes, xf, grids, out); break;
+        case XF_IQ1S: k_moe_gq2<XF_IQ1S, RPW, U><<<g, 256, 0, st>>>(xq, xs, which, ids, dslot, pool, s0, xbytes, xf, grids, out); break;
         default: k_moe_gq2<XF_IQ3S, RPW, U><<<g, 256, 0, st>>>(xq, xs, which, ids, dslot, pool, s0, xbytes, xf, grids, out); break;
     }
 }
@@ -555,7 +615,7 @@ inline void gg_moe_launch_q2(int which, int mf, const int8_t* xq, const float* x
 template <int MF>
 __global__ void __launch_bounds__(256) k_deq_gg(const uint8_t* q, const __half* ds, int N, int K, const uint8_t* grids,
                                                 bf16* out) {
-    __shared__ __align__(16) uint32_t sgrid[2048];
+    __shared__ __align__(16) uint32_t sgrid[gg_grid_bytes(MF) / 4];
     gg_load_grid<MF>(grids, sgrid);
     constexpr int CB = MF == XF_IQ2XXS ? 64 : MF == XF_IQ3XXS ? 96 : MF == XF_IQ2S ? 80 : 108;
     const size_t u = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
@@ -600,6 +660,14 @@ __device__ __forceinline__ void gg_sub8(const uint8_t* c, int k, int h, const vo
         const uint32_t s = (sg >> (8 * h)) & 255;
 #pragma unroll
         for (int j = 0; j < 8; j++) w[j] = gg_sgn(db * gg_u8f(j < 4 ? g.x : g.y, j & 3), s, j);
+    } else if constexpr (MF == XF_IQ1S) {
+        uint16_t qh;
+        memcpy(&qh, c + 32 + 2 * k, 2);
+        const float dl = (float)(2 * ((qh >> 12) & 7) + 1);
+        const float delta = (qh & 0x8000) ? -0.125f : 0.125f;
+        const uint2 g = ((const uint2*)grid)[c[4 * k + h] | (((qh >> (3 * h)) & 7) << 8)];
+#pragma unroll
+        for (int j = 0; j < 8; j++) w[j] = dl * (gg_s8f(j < 4 ? g.x : g.y, j & 3) + delta);
     } else {   // XF_IQ3S
         const uint32_t q0 = *(const uint32_t*)(c + 8 * k), q1 = *(const uint32_t*)(c + 8 * k + 4);
         const uint32_t qh = c[64 + k], sg = *(const uint32_t*)(c + 72 + 4 * k);
@@ -621,7 +689,7 @@ __device__ __forceinline__ void gg_sub8(const uint8_t* c, int k, int h, const vo
 template <int MF>
 __global__ void __launch_bounds__(256) k_deq_gg4(const uint8_t* q, const __half* ds, int N, int K, const uint8_t* grids,
                                                  bf16* out) {
-    __shared__ __align__(16) uint32_t sgrid[2048];
+    __shared__ __align__(16) uint32_t sgrid[gg_grid_bytes(MF) / 4];
     gg_load_grid<MF>(grids, sgrid);
     constexpr int CB = MF == XF_IQ2XXS ? 64 : MF == XF_IQ3XXS ? 96 : MF == XF_IQ2S ? 80 : 108;
     const size_t nt = (size_t)N * K / 8;   // 8 weights per thread
@@ -650,6 +718,7 @@ inline void gg_deq_launch(int mf, const uint8_t* q, const void* s, int N, int K,
             case XF_IQ2XXS: k_deq_gg4<XF_IQ2XXS><<<nb4, 256, 0, st>>>(q, ds, N, K, grids, out); break;
             case XF_IQ3XXS: k_deq_gg4<XF_IQ3XXS><<<nb4, 256, 0, st>>>(q, ds, N, K, grids, out); break;
             case XF_IQ2S: k_deq_gg4<XF_IQ2S><<<nb4, 256, 0, st>>>(q, ds, N, K, grids, out); break;
+            case XF_IQ1S: k_deq_gg4<XF_IQ1S><<<nb4, 256, 0, st>>>(q, ds, N, K, grids, out); break;
             default: k_deq_gg4<XF_IQ3S><<<nb4, 256, 0, st>>>(q, ds, N, K, grids, out); break;
         }
         return;
@@ -658,6 +727,7 @@ inline void gg_deq_launch(int mf, const uint8_t* q, const void* s, int N, int K,
         case XF_IQ2XXS: k_deq_gg<XF_IQ2XXS><<<nbk, 256, 0, st>>>(q, ds, N, K, grids, out); break;
         case XF_IQ3XXS: k_deq_gg<XF_IQ3XXS><<<nbk, 256, 0, st>>>(q, ds, N, K, grids, out); break;
         case XF_IQ2S: k_deq_gg<XF_IQ2S><<<nbk, 256, 0, st>>>(q, ds, N, K, grids, out); break;
+        case XF_IQ1S: k_deq_gg<XF_IQ1S><<<nbk, 256, 0, st>>>(q, ds, N, K, grids, out); break;
         default: k_deq_gg<XF_IQ3S><<<nbk, 256, 0, st>>>(q, ds, N, K, grids, out); break;
     }
 }

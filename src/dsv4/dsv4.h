@@ -79,17 +79,26 @@ inline bool is_engram(int l) { return l == 1 || l == 14; }
 // R16 [dsv4-gguf-iq]: GGUF i-quant matrix formats 4..7 (gguf_iq.h; Maya-S's bytes, opt-in --gguf-experts); an expert
 // format of the GGUF mode = XF_GG | gate (bits 0-1) | up (bits 2-3) | down (bits 4-5), each = matrix format - 4
 enum XFmt : uint8_t { XF_FP4 = 0, XF_CB3 = 1, XF_CB2 = 2, XF_M23 = 3, XF_IQ2XXS = 4, XF_IQ3XXS = 5, XF_IQ2S = 6, XF_IQ3S = 7,
-                      XF_GG = 0x40 };
+                      XF_IQ1S = 8,   // [iq1s] 1.5625 bpw, block_iq1_s: d | qs[32] | qh[8] = 50 B, 48 code bytes
+                      XF_GG = 0x40,
+                      // [iq1s] bit 7: an expert whose THREE matrices are all IQ1_S. The three 2-bit fields in bits
+                      // 0-5 hold formats 4..7 only, so the fifth format needs its own bit; a mixed IQ1_S expert
+                      // (e.g. gate/up IQ1_S, down IQ3_S) does not fit and the loader REFUSES it rather than guess.
+                      XF_GG1 = 0x80 };
 __host__ __device__ inline bool is_gg(int f) { return f >= 0 && (f & XF_GG); }
-__host__ __device__ inline bool is_iq(int mf) { return mf >= XF_IQ2XXS && mf <= XF_IQ3S; }
+__host__ __device__ inline bool is_iq(int mf) { return mf >= XF_IQ2XXS && mf <= XF_IQ1S; }
 __host__ __device__ inline XFmt gg_expert_fmt(XFmt g, XFmt u, XFmt d) {
     return (XFmt)(XF_GG | (g - 4) | ((u - 4) << 2) | ((d - 4) << 4));
 }
+// [iq1s] an expert uniformly IQ1_S: the flag form (see XF_GG1)
+__host__ __device__ inline XFmt gg_expert_fmt1() {
+    return (XFmt)(XF_GG | XF_GG1);
+}
 // code bytes of one 256-weight block without its fp16 d (gguf_iq.h layout)
-__host__ __device__ inline int gg_cbytes(int mf) { return mf == XF_IQ2XXS ? 64 : mf == XF_IQ3XXS ? 96 : mf == XF_IQ2S ? 80 : 108; }
+__host__ __device__ inline int gg_cbytes(int mf) { return mf == XF_IQ2XXS ? 64 : mf == XF_IQ3XXS ? 96 : mf == XF_IQ2S ? 80 : mf == XF_IQ1S ? 48 : 108; }
 // format of matrix i (0 w1, 1 w3, 2 w2) of an expert in format f
 __host__ __device__ inline XFmt mat_fmt(XFmt f, int i) {
-    if (is_gg(f)) return (XFmt)(4 + ((f >> (2 * i)) & 3));
+    if (is_gg(f)) return (f & XF_GG1) ? XF_IQ1S : (XFmt)(4 + ((f >> (2 * i)) & 3));
     return f == XF_M23 ? (i < 2 ? XF_CB2 : XF_CB3) : f;
 }
 // bits of a codebook matrix format (3 for cb3, 2 for cb2)

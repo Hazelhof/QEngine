@@ -127,6 +127,30 @@ template <> struct Blk<XF_IQ3S> {
         ml = (__mmask16)(s & 0xffff); mh = (__mmask16)(s >> 16); el = eh = e[k];
     }
 };
+// [iq1s] the prefill block: weights are computed as dl*(grid + delta) and handed over as fp32; mat() rounds them to
+// bf16 exactly as it does for every other format (cvtne2ps_pbh), so the numeric contract is unchanged.
+template <> struct Blk<XF_IQ1S> {
+    static constexpr int CB = 48;
+    const uint8_t* c;
+    float d;
+    inline void prep(const uint8_t* cc, float dd) { c = cc; d = dd; }
+    inline void w(int k, __m512& lo, __m512& hi, __mmask16& ml, __mmask16& mh, float& el, float& eh) const {
+        uint16_t qh;
+        memcpy(&qh, c + 32 + 2 * k, 2);
+        const float dl = d * (float)(2 * ((qh >> 12) & 7) + 1);
+        const float delta = (qh & 0x8000) ? -0.125f : 0.125f;
+        alignas(64) float f[32];
+        for (int l = 0; l < 4; l++) {
+            const int8_t* g = (const int8_t*)(gg_iq1s_grid + (c[4 * k + l] | (((qh >> (3 * l)) & 7) << 8)));
+            for (int j = 0; j < 8; j++) f[8 * l + j] = dl * ((float)g[j] + delta);
+        }
+        lo = _mm512_load_ps(f);
+        hi = _mm512_load_ps(f + 16);
+        ml = mh = (__mmask16)0;
+        el = eh = 1.f;
+    }
+};
+
 // y[r * ldy + row] = sum_k W[row][k] x[r][k] for rows [0, N) of one matrix (codes q, fp16 d ds), x [M][K] bf16
 template <int MF, int M, int R>
 inline void mat(const uint8_t* q, const uint16_t* ds, int N, int K, const uint16_t* x, float* y, int ldy) {
@@ -183,12 +207,13 @@ inline void mat_any(int m, const uint8_t* q, const uint16_t* ds, int N, int K, c
     }
 }
 // one matrix of format mf (an i-quant matrix format), m <= 8 rows
-inline bool mat_fmt_ok(int mf) { return mf == XF_IQ2XXS || mf == XF_IQ3XXS || mf == XF_IQ2S || mf == XF_IQ3S; }
+inline bool mat_fmt_ok(int mf) { return mf == XF_IQ2XXS || mf == XF_IQ3XXS || mf == XF_IQ2S || mf == XF_IQ3S || mf == XF_IQ1S; }
 inline void mat_run(int mf, int m, const uint8_t* q, const void* s, int N, int K, const uint16_t* x, float* y, int ldy) {
     const uint16_t* ds = (const uint16_t*)s;
     if (mf == XF_IQ2XXS) mat_any<XF_IQ2XXS>(m, q, ds, N, K, x, y, ldy);
     else if (mf == XF_IQ3XXS) mat_any<XF_IQ3XXS>(m, q, ds, N, K, x, y, ldy);
     else if (mf == XF_IQ2S) mat_any<XF_IQ2S>(m, q, ds, N, K, x, y, ldy);
+    else if (mf == XF_IQ1S) mat_any<XF_IQ1S>(m, q, ds, N, K, x, y, ldy);
     else mat_any<XF_IQ3S>(m, q, ds, N, K, x, y, ldy);
 }
 // GPU-equal helpers (dsv4_kernels.cuh k_glu_rows / k_q_fp8)
