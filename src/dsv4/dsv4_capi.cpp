@@ -100,6 +100,24 @@ bool parse(const char* args, Options& o, std::string& err) {
         else if (a == "--reserve-gb") o.reserve_gb = atof(v.c_str());
         else if (a == "--chunk") o.chunk = atoi(v.c_str());
         else if (a == "--host-budget-gib") o.host_budget_gib = atof(v.c_str());
+        // [ss16-capi-levers] the shape/placement knobs the CLI has always had and the C API - the only door the
+        // server has - did not: an arm that wanted them errored out, which reads like a broken library (the same
+        // class as --hsplit and --dspark-adapt). Every default is untouched: passing nothing changes nothing.
+        else if (a == "--dyn") o.dyn = atoi(v.c_str());
+        else if (a == "--dyn-margin") { o.dyn_margin = atof(v.c_str()); o.dyn_margin_set = true; }
+        else if (a == "--pool-min") o.pool_min = atoi(v.c_str());
+        else if (a == "--nv-cap") o.nv_cap = atof(v.c_str());
+        else if (a == "--swap-cap") o.swap_cap = atof(v.c_str());
+        else if (a == "--prefetch") o.prefetch = atoi(v.c_str());
+        else if (a == "--pf-early") o.pf_early = atoi(v.c_str());
+        else if (a == "--prefetch-mr") o.prefetch_mr = atoi(v.c_str());
+        else if (a == "--dspark-n") o.dspark_n = atoi(v.c_str());
+        else if (a == "--band-cb3") o.band_cb3 = atoi(v.c_str());
+        else if (a == "--dspark-cb3") o.dspark_cb3 = atoi(v.c_str());
+        else if (a == "--attn-tc") o.attn_tc = atoi(v.c_str());
+        else if (a == "--small-prefill") o.small_prefill = atoi(v.c_str());
+        else if (a == "--placement-in") o.placement_in = v;
+        else if (a == "--placement-out") o.placement_out = v;
         else if (a == "--tier-reset" || a == "--archive-gib") continue;   // (read by dsv4_create)
         else { err = "unknown argument " + a; return false; }
     }
