@@ -7115,8 +7115,22 @@ static void attn_share(Engine* E, Card& k, int ki, const Layer& W, int l, int s,
         int js[MAXNC], nj = 0;   // [ss16-nc4] one entry per other card
         for (int j = 0; j < (int)E->cards.size(); j++)
             if (j != ki) js[nj++] = j;
-        const Layer::AShare &B0 = W.ash[js[0]], &B1 = W.ash[js[1]];
-        if (x2q) {   // [dsv4-dec2-x2q]: their int8 columns + scales straight into wo_b's input
+        // [ss16-nc2] TWO cards have ONE peer each: the loop writes js[0] only, so reading js[1] was a wild host
+        // read into W.ash[] whose garbage g0/ng then became an xpull2 segment and a source pointer - the class
+        // the two-card arm faults on.  The two-peer launch below is untouched: only its guard is new.
+        const Layer::AShare &B0 = W.ash[js[0]];
+        const Layer::AShare &B1 = W.ash[nj > 1 ? js[1] : js[0]];   // defined even without a second peer
+        if (nj == 1) {   // one peer: the same single-source pull the NC > 3 tail below uses
+            if (x2q) {
+                auto seg1 = [&](const Layer::AShare& B) {
+                    return xseg({{k.d_di8 + (size_t)B.g0 * OLR, OG * OLR / 4, B.ng * OLR / 4, 0, -1},
+                                 {k.d_di8s + (size_t)B.g0 * OLR / 32, OG * OLR / 32, B.ng * OLR / 32, 0, -1}});
+                };
+                xpull(k, seg1(B0), n, k.rx2 + (size_t)js[0] * MAXR * X2W, tag + 1);
+            } else
+                xpull(k, xseg({{o2 + (size_t)B0.g0 * OLR, OG * OLR, B0.ng * OLR, 0, -1}}),
+                      n, k.rx2 + (size_t)js[0] * MAXR * X2W, tag + 1);
+        } else if (x2q) {   // [dsv4-dec2-x2q]: their int8 columns + scales straight into wo_b's input
             auto seg = [&](const Layer::AShare& B) {
                 return xseg({{k.d_di8 + (size_t)B.g0 * OLR, OG * OLR / 4, B.ng * OLR / 4, 0, -1},
                              {k.d_di8s + (size_t)B.g0 * OLR / 32, OG * OLR / 32, B.ng * OLR / 32, 0, -1}});
@@ -7205,9 +7219,14 @@ static void attn_split(Engine* E, Card& c, const Layer& W, int l, int s, int n, 
         int js[MAXNC], nj = 0;   // [ss16-nc4]
         for (int j = 0; j < (int)E->cards.size(); j++)
             if (j != oi) js[nj++] = j;
-        const Layer::AShare &B0 = W.ash[js[0]], &B1 = W.ash[js[1]];
-        xpull2(c, xseg({{c.ao + B0.n0, D, B0.nn, 0, -1}}), c.rx3 + (size_t)js[0] * MAXR * X3W,
-               xseg({{c.ao + B1.n0, D, B1.nn, 0, -1}}), c.rx3 + (size_t)js[1] * MAXR * X3W, n, tag + 2);
+        // [ss16-nc2] as the X2 pull above: js[1] is not written when there is one peer
+        const Layer::AShare &B0 = W.ash[js[0]];
+        const Layer::AShare &B1 = W.ash[nj > 1 ? js[1] : js[0]];
+        if (nj > 1)
+            xpull2(c, xseg({{c.ao + B0.n0, D, B0.nn, 0, -1}}), c.rx3 + (size_t)js[0] * MAXR * X3W,
+                   xseg({{c.ao + B1.n0, D, B1.nn, 0, -1}}), c.rx3 + (size_t)js[1] * MAXR * X3W, n, tag + 2);
+        else   // one peer: the owner's gather of the only other card's rows
+            xpull(c, xseg({{c.ao + B0.n0, D, B0.nn, 0, -1}}), n, c.rx3 + (size_t)js[0] * MAXR * X3W, tag + 2);
         for (int q = 2; q < nj; q++)   // [ss16-nc4] the owner's gather beyond the second source
             xpull(c, xseg({{c.ao + W.ash[js[q]].n0, D, W.ash[js[q]].nn, 0, -1}}),
                   n, c.rx3 + (size_t)js[q] * MAXR * X3W, tag + 2);
