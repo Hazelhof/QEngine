@@ -3164,7 +3164,14 @@ Engine* create(const Options& opt) {
     // ---- layer split by memory (estimate): per-layer non-expert bytes + hot experts of the converter's set
     int ndev = 0;
     DCK(cudaGetDeviceCount(&ndev));
-    DCHECK(o.nc >= 2 && o.nc <= MAXNC, "--nc: %d is outside [2, %d]", o.nc, MAXNC);   // [ss16-nc4]
+    // [ss16-nc2-gate] 2 cards is REFUSED until the decode path is fixed. Measured 2026-11-22: --nc 2 boots
+    // (tier 848/392, ready ~42 s) and faults on the first request on BOTH the ported library and the pre-port
+    // one (aeddfe54 and e7c8f31c), and five arms - plain, DSV4_NOPSPLIT=1, --hsplit 0, --dspark 0,
+    // DSV4_NOGRAPH=1 - all fault, so no feature toggle clears it and the gate would admit a shape that cannot
+    // serve. 3 and 4 are measured and sound; the port generalisation is untouched. Evidence: the
+    // SweetSixteen instrument section 14 / K29.
+    DCHECK(o.nc >= 3 && o.nc <= MAXNC, "--nc: %d is outside [3, %d] (2 cards is refused: the two-card decode "
+           "path faults on the first request - see the fork note)", o.nc, MAXNC);   // [ss16-nc4]
     DCHECK(ndev >= o.nc, "need %d GPUs, have %d (--nc)", o.nc, ndev);
     // [ss16-nc4] GATE 4b LIFTED 2026-11-22: the four-card path boots, serves and is measured (02 Log ledger, gate 4b).
     //   layers 0..10 / 11..21 / 22..33 / 34..39; head 4 x 32320 rows; DSpark on card 3; tiers 1088+1088+1120+584 =
