@@ -1,3 +1,9 @@
+> **This is a bench fork of [bpx03/QEngine](https://github.com/bpx03/QEngine)** — upstream is the product, and its
+> README below is unchanged except for these lines. What we measure on 4× RTX 5080 16 GB, and what is still only a
+> hypothesis, is in [BENCH.md](BENCH.md). MIT, upstream's licence and headers kept. Nothing here is a support offer.
+
+---
+
 # QEngine
 
 ![QEngine: fast local AI on RTX 3000, 4000 and 5000 series cards](docs/img/qengine.jpg)
