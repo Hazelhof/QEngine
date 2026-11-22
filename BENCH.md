@@ -54,6 +54,19 @@ This fork exists to answer one narrow question — **what does QEngine do, and w
   has, rather than merely unset. And a greedy reply at four cards is a function of its **states**, not of the prompt
   alone: the drafter on against off, and the per-card expert tier at two different slot counts, each move the served
   text while everything else is held. A four-card number that does not name those states is not a cell.
+- **Two cards serves now — and is servable, not reproducible, which is its own result.** Opening the gate to 2–4 cards
+  put `--nc 2` inside it, and it crashed: `attn_share()` fills its peer list from the cards that exist and then read
+  the *second* peer unconditionally, so with one peer an uninitialised stack index became a garbage segment descriptor
+  and a wild source pointer — an unspecified launch failure on the first request, identically on the library built
+  before this port. Guarding the two-peer launch and giving one peer the single-source pull is the whole fix (branch
+  `ss16/nc2`): the first request now answers 200, zero CUDA faults across thirteen requests, and **three and four
+  cards serve their filed identities unchanged**. At that width the tier is 1 240 slots over 40 layers and **four of
+  six identity prompts take different text across two draws**, so two cards is a width that runs, not a serving shape:
+  no rate, quality or identity cell is claimed for it.
+- **Upstream 1.5.1 (2026-11-22) changes Flash-Next only, and it is the fix this fork had already reproduced.** Its two
+  notes — `FLASH_CKPT=0` no longer takes SIGFPE at a divergence checkpoint, and the archive returns under its budget
+  after a pinned prefix is dropped — are the two defects reproduced here (#40, #41); upstream credits the issues, and
+  says the other models are unchanged. So every number above still describes the same code for the models it names.
 
 ### Branch policy
 
@@ -62,6 +75,10 @@ and a **no-change-at-N=3** proof — byte-identical greedy replies on a frozen p
 build at three cards. A change that cannot be expressed as a patch on upstream stays an experiment on its own branch
 and is not merged into this fork's `main`. If a change lands upstream, this fork deletes the branch and points at his
 commit.
+
+**One branch is already in that state.** The two Flash-Next defects reproduced here are fixed in upstream **1.5.1**;
+the defect branch keeps the reproduction and its probe scripts and points at his commit for the fix, rather than
+competing with it.
 
 ### Read this before filing anything here
 
