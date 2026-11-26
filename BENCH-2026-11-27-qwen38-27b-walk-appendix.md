@@ -10,6 +10,8 @@ repeats) beside this file.
 
 ## RedHatAI INT4 — FP8 KV
 
+**Engine: STOCK** — the image's own `/app/build/libqengine.so`, no mount; its boot log carries **no** `Q4bit` line.
+
 **`w1-int4-fp8-off-r3`** — `equivalent_score_150` **113**, totals 339/450 (75.3 %), `thinking_mode` force-off, `repeat` 3, `sampling_source` server, duration 749 s, runaways 1, started 2026-11-26T10:20:57.426864Z
 
 | pack | pass@1 (mean of 3) | pass@3 | repeats disagreed (`split`) |
@@ -141,6 +143,8 @@ RESULT N=8 ctx=16000 clean=1 pass=1 mps_tps=82.84 agg_tps=98.05 retention=1.050 
 ---
 
 ## RedHatAI INT4 — int4 KV
+
+**Engine: STOCK** — the image's own `/app/build/libqengine.so`, no mount; its boot log carries **no** `Q4bit` line.
 
 **`w1-int4-kv4-off-r3`** — `equivalent_score_150` **114**, totals 342/450 (76.0 %), `thinking_mode` force-off, `repeat` 3, `sampling_source` server, duration 751 s, runaways 1, started 2026-11-26T11:19:35.010928Z
 
@@ -274,6 +278,8 @@ RESULT N=8 ctx=16000 clean=1 pass=1 mps_tps=88.86 agg_tps=99.26 retention=1.076 
 
 ## bpx03 INT8 — FP8 KV
 
+**Engine: STOCK** — the image's own `/app/build/libqengine.so`, no mount; its boot log carries **no** `Q4bit` line.
+
 **`w2-int8-fp8-off-r3`** — `equivalent_score_150` **107**, totals 322/450 (71.6 %), `thinking_mode` force-off, `repeat` 3, `sampling_source` server, duration 802 s, runaways 1, started 2026-11-26T12:21:11.116126Z
 
 | pack | pass@1 (mean of 3) | pass@3 | repeats disagreed (`split`) |
@@ -405,6 +411,8 @@ RESULT N=8 ctx=16000 clean=1 pass=1 mps_tps=66.64 agg_tps=89.93 retention=1.019 
 ---
 
 ## bpx03 INT8 — int4 KV
+
+**Engine: STOCK** — the image's own `/app/build/libqengine.so`, no mount; its boot log carries **no** `Q4bit` line.
 
 **`w2-int8-kv4-off-r3`** — `equivalent_score_150` **110**, totals 331/450 (73.6 %), `thinking_mode` force-off, `repeat` 3, `sampling_source` server, duration 823 s, runaways 0, started 2026-11-26T13:27:46.398630Z
 
@@ -538,6 +546,8 @@ RESULT N=8 ctx=16000 clean=1 pass=1 mps_tps=71.06 agg_tps=88.34 retention=1.021 
 
 ## primitive-ai NVFP4/FP8 — FP8 KV
 
+**Engine: OURS** — `libqengine.so` sha256 `313ec400971cc3b0…` mounted over the image's, plus the tree's `server/assets.py`; its boot log carries `Q4bit P5b: sharded pack: 5 shard(s) from model.safetensors.index.json`.
+
 **`w3-nvfp4-fp8-off-r3`** — `equivalent_score_150` **108**, totals 323/450 (71.8 %), `thinking_mode` force-off, `repeat` 3, `sampling_source` server, duration 810 s, runaways 0, started 2026-11-26T14:38:36.306898Z
 
 | pack | pass@1 (mean of 3) | pass@3 | repeats disagreed (`split`) |
@@ -669,6 +679,8 @@ RESULT N=8 ctx=16000 clean=1 pass=1 mps_tps=77.45 agg_tps=97.39 retention=0.993 
 ---
 
 ## primitive-ai NVFP4/FP8 — int4 KV
+
+**Engine: OURS** — `libqengine.so` sha256 `313ec400971cc3b0…` mounted over the image's, plus the tree's `server/assets.py`; its boot log carries `Q4bit P5b: sharded pack: 5 shard(s) from model.safetensors.index.json`.
 
 **`w3-nvfp4-kv4-off-r3`** — `equivalent_score_150` **103**, totals 310/450 (68.9 %), `thinking_mode` force-off, `repeat` 3, `sampling_source` server, duration 798 s, runaways 3, started 2026-11-26T15:49:42.663694Z
 
