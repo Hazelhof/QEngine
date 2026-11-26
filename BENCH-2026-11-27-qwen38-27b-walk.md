@@ -70,7 +70,41 @@ only by lending it the 32 BF16 `k_scale`/`v_scale` scalars from the INT4 checkpo
 | 5 | primitive-ai NVFP4/FP8 | FP8 (lent) | 1,107,968 tok | **108** | **122** | +14 |
 | 6 | primitive-ai NVFP4/FP8 | int4 (lent) | 1,857,536 tok | **103** | **124** | +21 |
 
-Twelve legs, one fresh boot each. pass@3 alongside: 126 · 128 · 121 · 122 · 120 · 122 · 127 · 128 · 122 · 124 · 113.
+Twelve legs, one fresh boot each. pass@3 alongside: 126 · 128 · 121 · 122 · 120 · 122 · 127 · 128 · 124 · 125 · 132 · 135.
+
+### Per-pack, every arm — the club's own column layout
+
+`TC · IF · SO · DE · RM · BF · HA · CLI` = `toolcall-15 · instructfollow-15 · structoutput-15 · dataextract-15 ·
+reasonmath-15 · bugfind-15 · hermesagent-20 · cli-40`. Each cell is **pass@1 averaged over the three repeats**;
+`split` is how many of the 150 scenarios had repeats that disagreed.
+
+**Thinking OFF**
+
+| checkpoint | KV | TC | IF | SO | DE | RM | BF | HA | CLI | /150 | pass@3 | split |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| RedHatAI INT4 | FP8 | 12.0/15 | 10.0/15 | 11.0/15 | 10.3/15 | 13.7/15 | 14.7/15 | 13.0/20 | 28.3/40 | **113** | 126 | 26 |
+| RedHatAI INT4 | int4 | 12.7/15 | 10.7/15 | 11.0/15 | 11.0/15 | 13.3/15 | 14.3/15 | 13.7/20 | 27.3/40 | **114** | 128 | 27 |
+| bpx03 INT8 | FP8 | 13.0/15 | 9.7/15 | 10.3/15 | 10.7/15 | 13.3/15 | 14.0/15 | 13.7/20 | 22.7/40 | **107** | 121 | 25 |
+| bpx03 INT8 | int4 | 13.3/15 | 10.3/15 | 11.3/15 | 10.0/15 | 13.3/15 | 14.0/15 | 15.7/20 | 22.3/40 | **110** | 122 | 26 |
+| primitive-ai NVFP4/FP8 | FP8 | 13.0/15 | 9.0/15 | 12.0/15 | 12.0/15 | 13.7/15 | 14.0/15 | 13.3/20 | 20.7/40 | **108** | 120 | 25 |
+| primitive-ai NVFP4/FP8 | int4 | 12.7/15 | 9.0/15 | 11.7/15 | 11.7/15 | 13.0/15 | 12.0/15 | 13.0/20 | 20.3/40 | **103** | 113 | 21 |
+
+**Thinking ON**
+
+| checkpoint | KV | TC | IF | SO | DE | RM | BF | HA | CLI | /150 | pass@3 | split |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| RedHatAI INT4 | FP8 | 13.3/15 | 14.3/15 | 13.0/15 | 13.3/15 | 14.3/15 | 14.0/15 | 14.3/20 | 31.0/40 | **128** | 140 | 24 |
+| RedHatAI INT4 | int4 | 13.0/15 | 14.3/15 | 13.0/15 | 13.3/15 | 15.0/15 | 14.7/15 | 14.3/20 | 30.3/40 | **128** | 136 | 20 |
+| bpx03 INT8 | FP8 | 13.0/15 | 14.0/15 | 12.0/15 | 13.7/15 | 15.0/15 | 14.7/15 | 14.0/20 | 31.0/40 | **127** | 134 | 16 |
+| bpx03 INT8 | int4 | 13.0/15 | 13.7/15 | 12.7/15 | 13.3/15 | 15.0/15 | 15.0/15 | 15.0/20 | 30.0/40 | **128** | 137 | 17 |
+| primitive-ai NVFP4/FP8 | FP8 | 13.0/15 | 14.7/15 | 11.3/15 | 13.7/15 | 12.3/15 | 13.0/15 | 13.7/20 | 30.3/40 | **122** | 132 | 23 |
+| primitive-ai NVFP4/FP8 | int4 | 13.0/15 | 14.0/15 | 12.0/15 | 13.7/15 | 14.0/15 | 13.3/15 | 13.3/20 | 30.7/40 | **124** | 135 | 24 |
+
+Two things this layout makes visible that a total hides. **`cli-40` is where the checkpoints separate** — 28.3 / 22.7 /
+20.7 on the OFF legs — and it is also the pack with the largest `split` on every leg (9–12 of its 40 scenarios),
+which is why the separation does not survive the floor. And **`hermesagent-20` is the only pack where the int4 arm is
+clearly ahead on the INT8 checkpoint** (15.7/20 against 13.7/20) — the largest single-pack cross-arm difference in the
+whole walk, and still inside that pack's own repeat disagreement.
 
 ---
 
@@ -212,6 +246,23 @@ Verify a leg is the leg you meant by reading its JSON: `thinking_mode`, `repeat`
 `equivalent_score_150`, `totals`, `runaway`, and `thinking_validity` per pack. Note that `thinking_validity` has **no
 entry for `hermesagent-20`**, so a `validity=valid` on a leg including the sandboxed packs is a partial claim — the
 count covers seven of the eight.
+
+---
+
+## 10. The data behind it
+
+This page is the readable half; the measurements are filed beside it:
+
+- **`BENCH-2026-11-27-qwen38-27b-walk-appendix.md`** — per leg: `equivalent_score_150`, totals, duration, runaway
+  count, `thinking_mode`/`repeat`/`sampling_source`, the **per-pack table with pass@1, pass@3 and how many scenarios'
+  three repeats disagreed**, the `thinking_validity` map per pack, then the `bench.sh` summary **and every warm-up and
+  measured run**, the `bench-agentic.sh` turn table, the `concurrency-probe.sh` per-round table, the
+  `verify-stress.sh` rungs, and the `soak-test.sh` verdict block.
+- **`walk-scenarios.csv`** — 5,400 rows: 12 legs × 150 scenarios × 3 repeats, with `passed`, `failure_mode`, the
+  verifier's own `detail`, latency and completion tokens per row. That is the file to diff a future run against.
+- **Shipped from the same session, not published:** the twelve harness JSONs (≈8.5 MB each), the raw `bench`/
+  `agentic`/`concurrency`/`stress`/`soak` captures and the boot logs. They stay on our bench host; the appendix is
+  generated from them, so nothing in it is retyped.
 
 ---
 
