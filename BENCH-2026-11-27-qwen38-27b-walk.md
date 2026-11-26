@@ -44,6 +44,30 @@ one-draw count an earlier report used.
 
 ---
 
+## 1b. Which ENGINE each arm ran — read this before any row
+
+There are two axes in this bench and only one of them is about our work. **The engine** is either the image's own
+library or ours; **the checkpoint** is one of the three packs. Tonight's matrix is checkpoint × KV precision, and the
+engine differs on only two of the six arms — because that third pack cannot be loaded by stock at all.
+
+| arms | engine | evidence in the boot's own log |
+|---|---|---|
+| **1–2** RedHatAI INT4, FP8 and int4 | **stock QEngine** (image's own `/app/build/libqengine.so`, no mount, no patch) | no `Q4bit` line anywhere in the boot log |
+| **3–4** bpx03 INT8, FP8 and int4 | **stock QEngine** (same image, same library) | no `Q4bit` line anywhere in the boot log |
+| **5–6** primitive-ai NVFP4/FP8, FP8 and int4 | **ours** — `libqengine.so` sha256 `313ec400971cc3b0…` mounted over the image's, plus the tree's `server/assets.py` | `Q4bit P5b: sharded pack: 5 shard(s) from model.safetensors.index.json` |
+
+So **arms 1–4 are QEngine exactly as shipped** — that is the "without the new backend" column if that is what you are
+looking for — and **arms 5–6 are the only patched ones**, where the patch is a *loader*, not a performance claim: stock
+refuses that checkpoint by name.
+
+**And a warning that belongs right here: no arm in this bench prices the backend fix.** The fix lives on
+`attention_seg`'s `s.fp8 && attention_dec8_enabled()` branch, and both KV arms in this walk take that branch — so on
+arms 3–4 the patched and unpatched libraries are the *same code path*, and the same is true of arms 1–2. The only KV
+state where the fix is load-bearing is **bf16**, which this bench does not run. A before/after of the backend is a
+different experiment (one boot a side, same checkpoint, same KV), and it is not in this report.
+
+---
+
 ## 2. The three checkpoints
 
 | pack | revision | what it is |
@@ -61,14 +85,14 @@ only by lending it the 32 BF16 `k_scale`/`v_scale` scalars from the INT4 checkpo
 
 ## 3. The headline — six arms, both thinking legs
 
-| # | checkpoint | KV arm | shape | OFF (`/150`) | ON (`/150`) | thinking Δ |
-|---|---|---|---:|---:|---:|---:|
-| 1 | RedHatAI INT4 | FP8 | 1,022,976 tok | **113** | **128** | +15 |
-| 2 | RedHatAI INT4 | int4 | 1,712,128 tok | **114** | **128** | +14 |
-| 3 | bpx03 INT8 | FP8 | 672,768 tok | **107** | **127** | +20 |
-| 4 | bpx03 INT8 | int4 | 1,116,160 tok | **110** | **128** | +18 |
-| 5 | primitive-ai NVFP4/FP8 | FP8 (lent) | 1,107,968 tok | **108** | **122** | +14 |
-| 6 | primitive-ai NVFP4/FP8 | int4 (lent) | 1,857,536 tok | **103** | **124** | +21 |
+| # | checkpoint | KV arm | engine | shape | OFF (`/150`) | ON (`/150`) | thinking Δ |
+|---|---|---|---|---|---:|---:|---:|
+| 1 | RedHatAI INT4 | FP8 | **stock** | 1,022,976 tok | **113** | **128** | +15 |
+| 2 | RedHatAI INT4 | int4 | **stock** | 1,712,128 tok | **114** | **128** | +14 |
+| 3 | bpx03 INT8 | FP8 | **stock** | 672,768 tok | **107** | **127** | +20 |
+| 4 | bpx03 INT8 | int4 | **stock** | 1,116,160 tok | **110** | **128** | +18 |
+| 5 | primitive-ai NVFP4/FP8 | FP8 (lent) | ours | 1,107,968 tok | **108** | **122** | +14 |
+| 6 | primitive-ai NVFP4/FP8 | int4 (lent) | ours | 1,857,536 tok | **103** | **124** | +21 |
 
 Twelve legs, one fresh boot each. pass@3 alongside: 126 · 128 · 121 · 122 · 120 · 122 · 127 · 128 · 124 · 125 · 132 · 135.
 
@@ -80,25 +104,25 @@ reasonmath-15 · bugfind-15 · hermesagent-20 · cli-40`. Each cell is **pass@1 
 
 **Thinking OFF**
 
-| checkpoint | KV | TC | IF | SO | DE | RM | BF | HA | CLI | /150 | pass@3 | split |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| RedHatAI INT4 | FP8 | 12.0/15 | 10.0/15 | 11.0/15 | 10.3/15 | 13.7/15 | 14.7/15 | 13.0/20 | 28.3/40 | **113** | 126 | 26 |
-| RedHatAI INT4 | int4 | 12.7/15 | 10.7/15 | 11.0/15 | 11.0/15 | 13.3/15 | 14.3/15 | 13.7/20 | 27.3/40 | **114** | 128 | 27 |
-| bpx03 INT8 | FP8 | 13.0/15 | 9.7/15 | 10.3/15 | 10.7/15 | 13.3/15 | 14.0/15 | 13.7/20 | 22.7/40 | **107** | 121 | 25 |
-| bpx03 INT8 | int4 | 13.3/15 | 10.3/15 | 11.3/15 | 10.0/15 | 13.3/15 | 14.0/15 | 15.7/20 | 22.3/40 | **110** | 122 | 26 |
-| primitive-ai NVFP4/FP8 | FP8 | 13.0/15 | 9.0/15 | 12.0/15 | 12.0/15 | 13.7/15 | 14.0/15 | 13.3/20 | 20.7/40 | **108** | 120 | 25 |
-| primitive-ai NVFP4/FP8 | int4 | 12.7/15 | 9.0/15 | 11.7/15 | 11.7/15 | 13.0/15 | 12.0/15 | 13.0/20 | 20.3/40 | **103** | 113 | 21 |
+| checkpoint | KV | engine | TC | IF | SO | DE | RM | BF | HA | CLI | /150 | pass@3 | split |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| RedHatAI INT4 | FP8 | stock | 12.0/15 | 10.0/15 | 11.0/15 | 10.3/15 | 13.7/15 | 14.7/15 | 13.0/20 | 28.3/40 | **113** | 126 | 26 |
+| RedHatAI INT4 | int4 | stock | 12.7/15 | 10.7/15 | 11.0/15 | 11.0/15 | 13.3/15 | 14.3/15 | 13.7/20 | 27.3/40 | **114** | 128 | 27 |
+| bpx03 INT8 | FP8 | stock | 13.0/15 | 9.7/15 | 10.3/15 | 10.7/15 | 13.3/15 | 14.0/15 | 13.7/20 | 22.7/40 | **107** | 121 | 25 |
+| bpx03 INT8 | int4 | stock | 13.3/15 | 10.3/15 | 11.3/15 | 10.0/15 | 13.3/15 | 14.0/15 | 15.7/20 | 22.3/40 | **110** | 122 | 26 |
+| primitive-ai NVFP4/FP8 | FP8 | ours | 13.0/15 | 9.0/15 | 12.0/15 | 12.0/15 | 13.7/15 | 14.0/15 | 13.3/20 | 20.7/40 | **108** | 120 | 25 |
+| primitive-ai NVFP4/FP8 | int4 | ours | 12.7/15 | 9.0/15 | 11.7/15 | 11.7/15 | 13.0/15 | 12.0/15 | 13.0/20 | 20.3/40 | **103** | 113 | 21 |
 
 **Thinking ON**
 
-| checkpoint | KV | TC | IF | SO | DE | RM | BF | HA | CLI | /150 | pass@3 | split |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| RedHatAI INT4 | FP8 | 13.3/15 | 14.3/15 | 13.0/15 | 13.3/15 | 14.3/15 | 14.0/15 | 14.3/20 | 31.0/40 | **128** | 140 | 24 |
-| RedHatAI INT4 | int4 | 13.0/15 | 14.3/15 | 13.0/15 | 13.3/15 | 15.0/15 | 14.7/15 | 14.3/20 | 30.3/40 | **128** | 136 | 20 |
-| bpx03 INT8 | FP8 | 13.0/15 | 14.0/15 | 12.0/15 | 13.7/15 | 15.0/15 | 14.7/15 | 14.0/20 | 31.0/40 | **127** | 134 | 16 |
-| bpx03 INT8 | int4 | 13.0/15 | 13.7/15 | 12.7/15 | 13.3/15 | 15.0/15 | 15.0/15 | 15.0/20 | 30.0/40 | **128** | 137 | 17 |
-| primitive-ai NVFP4/FP8 | FP8 | 13.0/15 | 14.7/15 | 11.3/15 | 13.7/15 | 12.3/15 | 13.0/15 | 13.7/20 | 30.3/40 | **122** | 132 | 23 |
-| primitive-ai NVFP4/FP8 | int4 | 13.0/15 | 14.0/15 | 12.0/15 | 13.7/15 | 14.0/15 | 13.3/15 | 13.3/20 | 30.7/40 | **124** | 135 | 24 |
+| checkpoint | KV | engine | TC | IF | SO | DE | RM | BF | HA | CLI | /150 | pass@3 | split |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| RedHatAI INT4 | FP8 | stock | 13.3/15 | 14.3/15 | 13.0/15 | 13.3/15 | 14.3/15 | 14.0/15 | 14.3/20 | 31.0/40 | **128** | 140 | 24 |
+| RedHatAI INT4 | int4 | stock | 13.0/15 | 14.3/15 | 13.0/15 | 13.3/15 | 15.0/15 | 14.7/15 | 14.3/20 | 30.3/40 | **128** | 136 | 20 |
+| bpx03 INT8 | FP8 | stock | 13.0/15 | 14.0/15 | 12.0/15 | 13.7/15 | 15.0/15 | 14.7/15 | 14.0/20 | 31.0/40 | **127** | 134 | 16 |
+| bpx03 INT8 | int4 | stock | 13.0/15 | 13.7/15 | 12.7/15 | 13.3/15 | 15.0/15 | 15.0/15 | 15.0/20 | 30.0/40 | **128** | 137 | 17 |
+| primitive-ai NVFP4/FP8 | FP8 | ours | 13.0/15 | 14.7/15 | 11.3/15 | 13.7/15 | 12.3/15 | 13.0/15 | 13.7/20 | 30.3/40 | **122** | 132 | 23 |
+| primitive-ai NVFP4/FP8 | int4 | ours | 13.0/15 | 14.0/15 | 12.0/15 | 13.7/15 | 14.0/15 | 13.3/15 | 13.3/20 | 30.7/40 | **124** | 135 | 24 |
 
 Two things this layout makes visible that a total hides. **`cli-40` is where the checkpoints separate** — 28.3 / 22.7 /
 20.7 on the OFF legs — and it is also the pack with the largest `split` on every leg (9–12 of its 40 scenarios),
