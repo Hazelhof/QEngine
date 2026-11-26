@@ -151,10 +151,26 @@ The INT8 checkpoint decodes at **0.68×** the INT4 checkpoint here (262.1 vs 386
 Its author's own card says 0.69 / 0.71 on 3× RTX 3090 — the ratio reproduces on different cards, which is the useful
 check on this arm: the pack costs what its author says it costs.
 
-**The KV arms differ by ≤6 % and the two cells were taken on separate boots**, so they are not a priced cost. The
-direction is consistent across the three pairs — decode slightly dearer, prefill slightly cheaper on int4 — which is
-what a 4-bit row read plus its dequantise would predict, but an interleaved ABAB pair on one boot would be needed to
-turn that into a number. This report does not contain that pair.
+**The KV arms are flat at a short prompt and are NOT flat at depth — the depth cells are the ones that matter.** Both
+are in the same `bench.sh` run per boot:
+
+| arm (per checkpoint) | decode @1k, FP8 → int4 | prefill 10K, FP8 → int4 | TTFT @90K, FP8 → int4 | **decode @90K, FP8 → int4** |
+|---|---|---|---|---|
+| RedHatAI INT4 | 386.9 → 379.6 (−1.9 %) | 7,674 → 7,793 (+1.6 %) | 13,464 → 13,243 ms (−1.6 %) | **284.9 → 224.6 (−21 %)** |
+| bpx03 INT8 | 262.1 → 261.9 (−0.1 %) | 7,355 → 7,477 (+1.7 %) | 12,877 → 13,007 ms (+1.0 %) | **178.9 → 166.8 (−7 %)** |
+| primitive-ai NVFP4 | 346.5 → 349.5 (+0.9 %) | 7,819 → 7,904 (+1.1 %) | 12,205 → 12,792 ms (+4.8 %) | **301.1 → 217.5 (−28 %)** |
+
+So the trade is real but it lives at depth, not at the short prompt a TTFT/rate check usually samples: at 1k tokens
+the two arms are inside this box's churn, while **at 90K of context the 4-bit cache costs 7–28 % of decode
+throughput** on every checkpoint measured — the group-of-32 rotate plus dequantise being read at depth is the
+mechanism the direction implies, and the INT8 checkpoint, already weight-bound, pays least.
+
+Two limits stated with it: **the 90K depth cell is one run per arm** (the 10K depth cells carry a 14–19 % CV), so
+quote the direction and the magnitude range, not a precise percentage; and an **interleaved ABAB on one boot** is the
+cell that would turn this into a priced cost. This report does not contain that pair.
+
+Prefill is 1–2 % **cheaper** on int4 in all three checkpoints — consistent in sign across six boots, small enough to
+be a shape rather than a number.
 
 ---
 
